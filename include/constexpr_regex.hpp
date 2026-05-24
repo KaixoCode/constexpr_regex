@@ -1227,7 +1227,7 @@ namespace kaixo {
             // if it's still empty, instead of closing the class.
 
             if constexpr (A.empty()) return std::type_identity<token_stream<Tokens...>>{};
-            else if constexpr (InsideClass && A.size() > 2 && A[1] == '-') {
+            else if constexpr (InsideClass && A.size() > 2 && A[1] == '-' && A[2] != ']') {
                 return regex_tokenizer<A += 3, Next, Tokens..., character_range_parser<A[0], A[2]>>{};
             }
             else if constexpr (!InsideClass && A[0] == '*') {

@@ -140,6 +140,16 @@ static_assert(r6.groups[0].match == "xxx");
 // ------------------------------------------------
 
 int main() {
+    using email_regex = kaixo::regex<"\\b([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\\.[a-zA-Z]+\\b)">;
+
+    constexpr auto parsed = email_regex::parse("my email address is test@example.com");
+    constexpr auto username = parsed.groups[0].match;
+    constexpr auto domain   = parsed.groups[1].match;
+
+    static_assert(parsed   == "test@example.com");
+    static_assert(username == "test");
+    static_assert(domain   == "example.com");
+
     return 0;
 }
 
