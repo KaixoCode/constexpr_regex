@@ -790,7 +790,7 @@ namespace kaixo {
                 typename Parent::result_type final_result{};
 
                 (([&] { // Find first followup that succeeds
-                    typename Parent::result_type result = parse<Parent, I + Is>(ctx);
+                    auto result = parse<Parent, I + Is>(ctx);
                     if (result) final_result = result;
                     return static_cast<bool>(result);
                 }()) || ...);
