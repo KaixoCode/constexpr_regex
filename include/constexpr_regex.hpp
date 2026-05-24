@@ -6,11 +6,12 @@
 // ------------------------------------------------
 
 #include <algorithm>
-#include <utility>
-#include <type_traits>
+#include <array>
 #include <concepts>
-#include <string_view>
 #include <optional>
+#include <string_view>
+#include <type_traits>
+#include <utility>
 
 // ------------------------------------------------
 
@@ -19,10 +20,105 @@ namespace kaixo {
     // ------------------------------------------------
 
     /**
-        This constexpr regex parser only returns a single string view. 
-        It doesn't support groups, it just tries to find a single match in the input string.
+        Capture group.
      */
-    using parse_result = std::optional<std::string_view>;
+    struct group {
+        std::optional<std::string_view> match;
+    };
+
+    /**
+        Parse result containing N groups.
+
+        @tparam N       number of capture groups, determined when parsing the regex.
+     */
+    template<std::size_t N = 0>
+    struct parse_result {
+
+        // ------------------------------------------------
+
+        constexpr static std::size_t size = N;
+
+        // ------------------------------------------------
+
+        constexpr parse_result() = default;
+        constexpr parse_result(std::nullopt_t) {}
+        constexpr parse_result(std::string_view result) : match(result) {}
+
+        // ------------------------------------------------
+
+        template<std::size_t I> 
+            requires (I < N) // Allow casting to results with more groups, not less.
+        constexpr parse_result(parse_result<I> other)
+            : match(other.match)
+        {
+            std::copy(other.groups.begin(), other.groups.end(), groups.begin());
+        }
+
+        // ------------------------------------------------
+
+        // @returns true if the parse result contains a match.
+        constexpr bool has_match() const { return match.has_value(); }
+
+        // @returns true if the parse result contains a match.
+        constexpr operator bool() const { return match.operator bool(); }
+
+        // @returns returns the full match as a string_view, throws if no match.
+        constexpr explicit operator std::string_view() const { return match.value(); }
+
+        /** Compare the contained match to a string_view.
+        
+            @param other        string to compare match to.
+
+            @returns true if the match equals the string.
+         */
+        constexpr bool operator==(std::string_view other) const { return match == other; }
+
+        // ------------------------------------------------
+
+        /** Merge 2 parse results into a single result. Only valid
+            if these 2 parse results are neighbours in the input string.
+
+            @param a            first parse result.
+            @param b            second parse result.
+
+            @returns the combined match, including all the groups, with groups in b taking precedence over a.
+         */
+        template<std::size_t A, std::size_t B>
+            requires (A <= N && B <= N)
+        constexpr static parse_result merge(parse_result<A> a, parse_result<B> b) {
+            parse_result result;
+            result.match = {
+                a.match->data(),
+                a.match->size() + b.match->size()
+            };
+
+            if constexpr (A != 0) {
+                for (std::size_t i = 0; i < A; ++i) {
+                    if (a.groups[i].match) {
+                        result.groups[i] = a.groups[i];
+                    }
+                }
+            }
+
+            if constexpr (B != 0) {
+                for (std::size_t i = 0; i < B; ++i) {
+                    if (b.groups[i].match) {
+                        result.groups[i] = b.groups[i];
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        // ------------------------------------------------
+
+        std::optional<std::string_view> match;
+        std::array<group, N> groups{};
+
+        // ------------------------------------------------
+
+    };
 
     // ------------------------------------------------
 
@@ -45,6 +141,12 @@ namespace kaixo {
 
         // ------------------------------------------------
 
+        /** Backtrack a certain amount, returns a new context if backtracking is possible.
+            
+            @param size         number of characters to backtrack.
+
+            @returns a new context if it's possible, nullopt if not enough characters to backtrack.
+         */
         constexpr std::optional<context> backtrack(std::size_t size) {
 			std::size_t available_room = original.size() - value.size();
             if (size > available_room) return std::nullopt; // Not enough room to backtrack
@@ -58,11 +160,13 @@ namespace kaixo {
 
         // ------------------------------------------------
 
+        // @returns the previous character, or null-terminator if no previous.
         constexpr char previous() const {
             if (value.size() == original.size()) return '\0';
             return original[original.size() - value.size() - 1];
 		}
 
+        // @returns the upcoming character, or null-terminator if no next.
         constexpr char next() const {
             if (value.empty()) return '\0';
             return value.front();
@@ -71,20 +175,20 @@ namespace kaixo {
         // ------------------------------------------------
 
         // @returns zero-width parse result if at start of input, otherwise nullopt.
-        constexpr parse_result beginning_boundary() {
+        constexpr parse_result<> beginning_boundary() {
             if (value.size() != original.size()) return std::nullopt;
             if (value.empty()) return std::nullopt;
             return value.substr(0, 0);
         }
 
         // @returns zero-width parse result if at end of input, otherwise nullopt.
-        constexpr parse_result end_boundary() {
+        constexpr parse_result<> end_boundary() {
             if (value.size() != 0) return std::nullopt;
             return value.substr(0, 0);
         }
 
         // @returns zero-width parse result if at word boundary, otherwise nullopt.
-        constexpr parse_result word_boundary() {
+        constexpr parse_result<> word_boundary() {
 			bool was_word = is_word_char(previous());
 			bool is_word = is_word_char(next());
 			if (was_word != is_word) return value.substr(0, 0);
@@ -92,7 +196,7 @@ namespace kaixo {
         }
 
         // @returns zero-width parse result if not at word boundary, otherwise nullopt.
-        constexpr parse_result non_word_boundary() {
+        constexpr parse_result<> non_word_boundary() {
 			bool was_word = is_word_char(previous());
 			bool is_word = is_word_char(next());
 			if (was_word == is_word) return value.substr(0, 0);
@@ -107,7 +211,7 @@ namespace kaixo {
 
             @returns the parsed character if success, otherwise nullopt.
          */
-        constexpr parse_result consume(char c) {
+        constexpr parse_result<> consume(char c) {
             if (value.empty() || value.front() != c) return std::nullopt;
             std::string_view result = value.substr(0, 1);
             value = value.substr(1);
@@ -120,7 +224,7 @@ namespace kaixo {
 
             @returns a single parsed character if the input is not empty, otherwise nullopt.
          */
-        constexpr parse_result consume_one() {
+        constexpr parse_result<> consume_one() {
             if (value.empty()) return std::nullopt;
 			std::string_view result = value.substr(0, 1);
 			value = value.substr(1);
@@ -133,7 +237,7 @@ namespace kaixo {
 
             @returns the parsed character if success, otherwise nullopt.
          */
-        constexpr parse_result consume_one_of(std::string_view chars) {
+        constexpr parse_result<> consume_one_of(std::string_view chars) {
             if (value.empty()) return std::nullopt;
             auto it = chars.find(value.front());
             if (it != std::string_view::npos) {
@@ -150,7 +254,7 @@ namespace kaixo {
 
             @returns the parsed character if success, otherwise nullopt.
          */
-        constexpr parse_result consume_one_not_of(std::string_view chars) {
+        constexpr parse_result<> consume_one_not_of(std::string_view chars) {
             if (value.empty()) return std::nullopt;
             auto it = chars.find(value.front());
             if (it == std::string_view::npos) {
@@ -168,7 +272,7 @@ namespace kaixo {
             @returns the parsed character if success, otherwise nullopt.
          */
         template<std::invocable<char> Lambda>
-        constexpr parse_result consume_one_of(Lambda functor) {
+        constexpr parse_result<> consume_one_of(Lambda functor) {
             if (value.empty()) return std::nullopt;
             if (functor(value.front())) {
                 std::string_view result = value.substr(0, 1);
@@ -185,7 +289,7 @@ namespace kaixo {
             @returns the parsed character if success, otherwise nullopt.
          */
         template<std::invocable<char> Lambda>
-        constexpr parse_result consume_one_not_of(Lambda functor) {
+        constexpr parse_result<> consume_one_not_of(Lambda functor) {
             if (value.empty()) return std::nullopt;
             if (!functor(value.front())) {
                 std::string_view result = value.substr(0, 1);
@@ -209,7 +313,7 @@ namespace kaixo {
             
                 @returns a failed parse result.
              */
-            constexpr parse_result revert() {
+            constexpr parse_result<> revert() {
                 self->value = backup;
                 return std::nullopt;
             }
@@ -227,48 +331,55 @@ namespace kaixo {
     // ------------------------------------------------
     
     /**
-        Regex length struct is used during parsing to determine the minimum
+        Regex metadata struct is used during parsing to determine the minimum
         and maximum possible length of a result from a particular regex.
         This is used to determine how far to backtrack during a lookbehind.
         And is also used to determine whether to disallow a variable-length 
-        lookbehind.
+        lookbehind. As well as group index for the parse result.
 
         @tparam Min         minimum possible length of a match.
         @tparam Max         maximum possible length of a match.
+        @tparam Group       current group index counter.
      */
-    template<std::size_t Min, std::size_t Max>
-    struct regex_length {
+    template<std::size_t Min, std::size_t Max, std::size_t GroupCounter = 0, std::size_t Group = std::string_view::npos>
+    struct regex_metadata {
 		constexpr static std::size_t min = Min;
 		constexpr static std::size_t max = Max;
+		constexpr static std::size_t group_counter = GroupCounter;
+		constexpr static std::size_t group = Group;
 
         /**
-            Combine lengths, takes the min/max of both.
+            Combine metadata, takes the min/max of both.
 
-            @tparam Other       Other regex_length.
+            @tparam Other       Other regex_metadata.
          */
         template<class Other>
-		using combine = regex_length<
+		using combine = regex_metadata<
               min == std::string_view::npos ? min
             : Other::min == std::string_view::npos ? Other::min
             : std::min(min, Other::min),
 			  max == std::string_view::npos ? max 
             : Other::max == std::string_view::npos ? Other::max
-            : std::max(max, Other::max)
+            : std::max(max, Other::max),
+            std::max(group_counter, Other::group_counter),
+            group
         >;
 
         /**
-            Add lengths together.
+            Add metadata together.
 
-            @tparam Other       Other regex_length.
+            @tparam Other       Other regex_metadata.
          */
         template<class Other>
-		using add = regex_length<
+		using add = regex_metadata<
               min == std::string_view::npos ? min 
             : Other::min == std::string_view::npos ? Other::min
             : min + Other::min,
 			  max == std::string_view::npos ? max 
             : Other::max == std::string_view::npos ? Other::max
-            : max + Other::max
+            : max + Other::max,
+            std::max(group_counter, Other::group_counter),
+            group
         >;
 
         /**
@@ -279,9 +390,11 @@ namespace kaixo {
             @tparam Token       A token that's now marked as optional.
          */
         template<class Token>
-		using add_optional = regex_length< // Subtract min length, as this was added before we knew it was 'many'.
+		using add_optional = regex_metadata< // Subtract min length, as this was added before we knew it was 'many'.
             min - (Token::min == std::string_view::npos ? 0 : Token::min),
-            max
+            max,
+            group_counter,
+            group
         >;
 
         /**
@@ -293,9 +406,11 @@ namespace kaixo {
             @tparam Token       A token that's now marked as '*'.
          */
         template<class Token>
-		using add_many = regex_length< // Subtract min length, as this was added before we knew it was 'many'.
+		using add_many = regex_metadata< // Subtract min length, as this was added before we knew it was 'many'.
             min - (Token::min == std::string_view::npos ? 0 : Token::min), 
-			std::string_view::npos
+			std::string_view::npos,
+            group_counter,
+            group
         >;
         
         /**
@@ -306,10 +421,15 @@ namespace kaixo {
             @tparam Token       A token that's now marked as '+'.
          */
         template<class Token>
-		using add_some = regex_length<
+		using add_some = regex_metadata<
             min, // Token length was already added before we knew it was 'some'.
-			std::string_view::npos
+			std::string_view::npos,
+            group_counter,
+            group
         >;
+
+        template<std::size_t I>
+        using with_group = regex_metadata<min, max, group_counter, I>;
     };
 
     // ------------------------------------------------
@@ -318,9 +438,9 @@ namespace kaixo {
         Parses any single character.
      */
     struct wildcard_character_parser {
-		using length = regex_length<1, 1>;
+		using metadata = regex_metadata<1, 1>;
 
-        static constexpr parse_result parse(context& ctx) {
+        static constexpr parse_result<> parse(context& ctx) {
             return ctx.consume_one();
         }
     };
@@ -332,9 +452,9 @@ namespace kaixo {
      */
     template<char C>
     struct single_character_parser {
-		using length = regex_length<1, 1>;
+		using metadata = regex_metadata<1, 1>;
 
-        static constexpr parse_result parse(context& ctx) {
+        static constexpr parse_result<> parse(context& ctx) {
             return ctx.consume(C);
         }
     };
@@ -347,9 +467,9 @@ namespace kaixo {
      */
     template<char C>
     struct meta_character_parser {
-		using length = regex_length<1, 1>;
+		using metadata = regex_metadata<1, 1>;
 
-        static constexpr parse_result parse(context& ctx) {
+        static constexpr parse_result<> parse(context& ctx) {
             if constexpr (C == 's') return ctx.consume_one_of(is_whitespace_char); // Whitespace
             else if constexpr (C == 'S') return ctx.consume_one_not_of(is_whitespace_char); // Non-Whitespace
             else if constexpr (C == 'd') return ctx.consume_one_of(is_digit_char); // Digit
@@ -371,9 +491,9 @@ namespace kaixo {
      */
     template<char A, char B>
     struct character_range_parser {
-		using length = regex_length<1, 1>;
+		using metadata = regex_metadata<1, 1>;
 
-        static constexpr parse_result parse(context& ctx) {
+        static constexpr parse_result<> parse(context& ctx) {
             return ctx.consume_one_of([](char c) -> bool { return c >= A && c <= B; });
         }
     };
@@ -386,9 +506,9 @@ namespace kaixo {
      */
     template<char C>
     struct boundary_assertion {
-		using length = regex_length<0, 0>;
+		using metadata = regex_metadata<0, 0>;
 
-        static constexpr parse_result parse(context& ctx) {
+        static constexpr parse_result<> parse(context& ctx) {
             if constexpr (C == 'b') return ctx.word_boundary(); 
             else if constexpr (C == 'B') return ctx.non_word_boundary();
             else if constexpr (C == '^') return ctx.beginning_boundary();
@@ -403,9 +523,9 @@ namespace kaixo {
      */
     template<class A>
     struct lookahead_assertion {
-		using length = regex_length<0, 0>;
+		using metadata = regex_metadata<0, 0>;
 
-        static constexpr parse_result parse(context& ctx) {
+        static constexpr parse_result<> parse(context& ctx) {
             auto _ = ctx.backup();
             auto result = A::parse(ctx);
             if (result) return _.revert(), ctx.value.substr(0, 0);
@@ -421,9 +541,9 @@ namespace kaixo {
      */
     template<class A>
     struct negative_lookahead_assertion {
-		using length = regex_length<0, 0>;
+		using metadata = regex_metadata<0, 0>;
 
-        static constexpr parse_result parse(context& ctx) {
+        static constexpr parse_result<> parse(context& ctx) {
             auto _ = ctx.backup();
             auto result = A::parse(ctx);
             if (!result) return _.revert(), ctx.value.substr(0, 0);
@@ -439,11 +559,11 @@ namespace kaixo {
      */
     template<class A>
     struct lookbehind_assertion {
-        static_assert(A::length::min == A::length::max, "Lookbehind assertions must have a fixed length");
-		using length = regex_length<0, 0>;
+        static_assert(A::metadata::min == A::metadata::max, "Lookbehind assertions must have a fixed length");
+		using metadata = regex_metadata<0, 0>;
 
-        static constexpr parse_result parse(context& ctx) {
-            auto backtrack = ctx.backtrack(A::length::min);
+        static constexpr parse_result<> parse(context& ctx) {
+            auto backtrack = ctx.backtrack(A::metadata::min);
 			if (!backtrack) return std::nullopt;
             auto result = A::parse(*backtrack);
             if (result) return ctx.value.substr(0, 0);
@@ -459,11 +579,11 @@ namespace kaixo {
      */
     template<class A>
     struct negative_lookbehind_assertion {
-		static_assert(A::length::min == A::length::max, "Lookbehind assertions must have a fixed length");
-        using length = regex_length<0, 0>;
+		static_assert(A::metadata::min == A::metadata::max, "Lookbehind assertions must have a fixed length");
+        using metadata = regex_metadata<0, 0>;
 
-        static constexpr parse_result parse(context& ctx) {
-            auto backtrack = ctx.backtrack(A::length::min);
+        static constexpr parse_result<> parse(context& ctx) {
+            auto backtrack = ctx.backtrack(A::metadata::min);
             if (!backtrack) return ctx.value.substr(0, 0);
             auto result = A::parse(*backtrack);
             if (!result) return ctx.value.substr(0, 0);
@@ -479,12 +599,12 @@ namespace kaixo {
      */
     template<class ...Args>
     struct character_class_parser {
-		static_assert(((Args::length::min == 1 && Args::length::max == 1) && ...), 
+		static_assert(((Args::metadata::min == 1 && Args::metadata::max == 1) && ...), 
             "All elements of a character class must consume a single character");
 
-        using length = regex_length<1, 1>;
+        using metadata = regex_metadata<1, 1>;
 
-        static constexpr parse_result parse(context& ctx) {
+        static constexpr parse_result<> parse(context& ctx) {
             parse_result final_result{};
 
             (([&] -> bool {
@@ -499,15 +619,15 @@ namespace kaixo {
 
     /**
         Character class parser parses a single character that's not in the 
-        user-defined character class.
+        user-defined character class.using length
 
         @tparam A           the character class parser that's negated.
      */
     template<class A>
     struct negated_character_class_parser {
-		using length = typename A::length;
+		using metadata = typename A::metadata;
 
-        static constexpr parse_result parse(context& ctx) {
+        static constexpr parse_result<> parse(context& ctx) {
 			auto _ = ctx.backup();
 			if (A::parse(ctx)) return _.revert();
             return ctx.consume_one();
@@ -542,7 +662,7 @@ namespace kaixo {
         The start node for every NFA graph. Dummy class.
      */
     struct graph_start_node {
-		using length = regex_length<0, 0>;
+		using metadata = regex_metadata<0, 0>;
     };
 
     /**
@@ -596,28 +716,33 @@ namespace kaixo {
         nested graph. 
 
         @tparam Self        when constructing, the current NFA graph type.
+        @tparam Result      when constructing, the parse result type
         @tparam I           when constructing, the index of the nested graph we're recursing to.
         @tparam Parent      when constructing, the current NFA graph's parent_wrapper.
      */
-    template<class Self, std::size_t I, class Parent>
+    template<class Self, class Result, std::size_t I, class Parent>
     struct parent_wrapper {
         constexpr static std::size_t index = I;
         using parent = Parent;
 		using self = Self;
+        using result_type = Result;
     };
     
     /**
         Constexpr NFA graph, with nfa_graph_nodes as template parameters.
 
-        @tparam Length      a regex_length constructed during parsing that tells our min/max result length.
+        @tparam MetaData    a regex_metadata constructed during parsing.
         @tparam ...Nodes    all the nfa_graph_nodes in this graph.
      */
-    template<class Length, class ...Nodes>
+    template<class MetaData, class ...Nodes>
     struct nfa_graph {
-        using length = Length;
+        using metadata = MetaData;
         using is_nfa_graph_specifier = int; // used in the is_nfa_graph concept.
-
+        using result_type = parse_result<metadata::group_counter>;
         using nodes = std::tuple<Nodes...>;
+
+        template<std::size_t I>
+        using with_group = nfa_graph<typename MetaData::template with_group<I>, Nodes...>;
 
         /** Try to find a match in a string view.
             
@@ -625,13 +750,13 @@ namespace kaixo {
 
             @returns parse result.
          */
-        constexpr static parse_result parse(std::string_view str) {
+        constexpr static result_type parse(std::string_view str) {
             context ctx{ str };
 
             for (std::size_t i = 0; i <= str.size(); i++) {
                 std::string_view sub_str = str.substr(i);
                 context ctx{ str, sub_str };
-                if (auto result = parse<parent_wrapper<void, 0, void>, 0>(ctx)) return result;
+                if (auto result = parse<parent_wrapper<void, result_type, 0, void>, 0>(ctx)) return result;
             }
 
             return std::nullopt;
@@ -643,8 +768,8 @@ namespace kaixo {
 
             @returns parse result.
          */
-        constexpr static parse_result parse(context& ctx) {
-			return parse<parent_wrapper<void, 0, void>, 0>(ctx);
+        constexpr static result_type parse(context& ctx) {
+			return parse<parent_wrapper<void, result_type, 0, void>, 0>(ctx);
         }
 
         /** Try to parse one of the possible followup nodes.
@@ -657,15 +782,15 @@ namespace kaixo {
             @returns parse result.
          */
         template<class Parent, std::size_t I>
-        constexpr static parse_result parse_followup(context& ctx) {
+        constexpr static typename Parent::result_type parse_followup(context& ctx) {
             using node = std::tuple_element_t<I, nodes>;
             using outs = typename node::outs;
 
             return [&]<std::size_t ...Is>(std::index_sequence<Is...>) {
-                parse_result final_result{};
+                typename Parent::result_type final_result{};
 
                 (([&] { // Find first followup that succeeds
-                    auto result = parse<Parent, I + Is>(ctx);
+                    typename Parent::result_type result = parse<Parent, I + Is>(ctx);
                     if (result) final_result = result;
                     return static_cast<bool>(result);
                 }()) || ...);
@@ -684,38 +809,64 @@ namespace kaixo {
             @returns parse result.
          */
         template<class Parent, std::size_t I>
-        constexpr static parse_result parse(context& ctx) {
+        constexpr static typename Parent::result_type parse(context& ctx) {
             if constexpr (I >= sizeof...(Nodes)) {
 				constexpr std::size_t parent_index = Parent::index;
                 using parent = typename Parent::self;
                 using parent_parent = typename Parent::parent;
 
-                if constexpr (std::same_as<parent, void>) {
-                    return ctx.value.substr(0, 0); // End of expression, no parent.
+                typename Parent::result_type result{};
+                std::string_view end_of_capture_boundary = ctx.value.substr(0, 0);
+
+                if constexpr (std::same_as<parent, void>) { // End of expression, no parent.
+                    result.match = end_of_capture_boundary;
                 } else { // Otherwise, recurse to followup of parent graph.
-					return parent::template parse_followup<parent_parent, parent_index>(ctx);
+                    result = parent::template parse_followup<parent_parent, parent_index>(ctx);
                 }
+                
+                // If sub-graph is linked to a group number, and no match has been set yet.
+                // Set it to the end_of_capture_boundary, this will be matched by the 
+                // graph_start_node to construct the full capture using the different in char*.
+                if constexpr (metadata::group != std::string_view::npos) {
+                    if (!result.groups[metadata::group].match) {
+                        result.groups[metadata::group].match = end_of_capture_boundary;
+                    }
+                }
+
+                return result;
             } else {
                 using node = std::tuple_element_t<I, nodes>;
                 using operation = typename node::operation;
 
 			    if constexpr (std::same_as<graph_start_node, operation>) {
-					return parse_followup<Parent, I>(ctx); // Start node, just move on to followups
-				} else if constexpr (is_nfa_graph<operation>) { // Nested graph, handles recursion and followups itself
-                    return operation::template parse<parent_wrapper<nfa_graph, I, Parent>, 0>(ctx);
+                    auto _ = ctx.backup();
+                    auto result = parse_followup<Parent, I>(ctx); // Start node, just move on to followups
+
+                    // If sub-graph is linked to a group number, and the match in the group is
+                    // set to a value, and that value is zero-length (boundary marker), assume this
+                    // to be our end_of_capture_boundary, and calculate the full capture using the backup.
+                    if constexpr (metadata::group != std::string_view::npos) {
+                        auto& match = result.groups[metadata::group].match;
+                        if (match && match.value().empty()) {
+                            std::size_t size = std::distance(_.backup.data(), match.value().data());
+                            match = std::string_view{ _.backup.data(), size };
+                        }
+                    }
+
+                    return result;
+				} else if constexpr (is_nfa_graph<operation>) { 
+                    // Nested graph, handles recursion and followups itself
+                    return operation::template parse<parent_wrapper<nfa_graph, typename Parent::result_type, I, Parent>, 0>(ctx);
                 } else {
                     auto _ = ctx.backup();
 
                     auto result = operation::parse(ctx);
                     if (!result) return _.revert();
 
-                    parse_result followup = parse_followup<Parent, I>(ctx);
+                    auto followup = parse_followup<Parent, I>(ctx);
                     if (!followup) return _.revert();
 
-                    return std::string_view{
-                        result.value().data(),
-                        result.value().size() + followup.value().size()
-                    };
+                    return Parent::result_type::merge(result, followup);
                 }
             }
         }
@@ -738,12 +889,13 @@ namespace kaixo {
     struct begin_character_class_token {};
     struct begin_negated_character_class_token {};
     struct end_character_class_token {};
+    struct capture_group_token {};
 
     template<template<class> class Nested>
-    struct nested_graph_token {};
+    struct nested_graph_token {}; // Signals nested NFA graph.
 
-    template<class Arg>
-	using unit_token = Arg;
+    template<class A>
+    using unit_token = A; // Used as unit in nested_graph_token.
 
     // ------------------------------------------------
 
@@ -753,32 +905,32 @@ namespace kaixo {
     // ------------------------------------------------
 
     /**
-        Converts a token_stream to an nga_graph type. Because of how
+        Converts a token_stream to an nfa_graph type. Because of how
         the parser works, it needs to reverse the types of the token_stream.
 
-        @tparam Length      the regex_length for the resulting NFA graph.
+        @tparam MetaData      the regex_metadata for the resulting NFA graph.
         @tparam Nodes       a token_stream of graph nodes.
         @tparam Result      the nfa_graph we're building.
      */
-    template<class Length, class Nodes, class Result = nfa_graph<Length>>
+    template<class MetaData, class Nodes, class Result = nfa_graph<MetaData>>
     struct to_nfa_graph;
 
-    template<class Length, class ...Result>
-    struct to_nfa_graph<Length, token_stream<>, nfa_graph<Length, Result...>> {
-        using type = nfa_graph<Length, Result...>;
+    template<class MetaData, class ...Result>
+    struct to_nfa_graph<MetaData, token_stream<>, nfa_graph<MetaData, Result...>> {
+        using type = nfa_graph<MetaData, Result...>;
     };
 
-    template<class Length, class Node, class ...Nodes, class ...Result>
-    struct to_nfa_graph<Length, token_stream<Node, Nodes...>, nfa_graph<Length, Result...>> {
+    template<class MetaData, class Node, class ...Nodes, class ...Result>
+    struct to_nfa_graph<MetaData, token_stream<Node, Nodes...>, nfa_graph<MetaData, Result...>> {
         using type = typename to_nfa_graph<
-              Length
+              MetaData
             , token_stream<Nodes...>
-			, nfa_graph<Length, Node, Result...>
+			, nfa_graph<MetaData, Node, Result...>
         >::type;
     };
 
-    template<class Length, class ...Nodes>
-    using to_nfa_graph_t = typename to_nfa_graph<Length, token_stream<Nodes...>>::type;
+    template<class MetaData, class ...Nodes>
+    using to_nfa_graph_t = typename to_nfa_graph<MetaData, token_stream<Nodes...>>::type;
 
     // ------------------------------------------------
     
@@ -821,26 +973,26 @@ namespace kaixo {
         The regex parser converts a stream of tokens into an NFA graph 
         using partial specializations of this class to match agains specific tokens.
 
-        @tparam Length      the regex_length instance that we're keeping track of for this nfa_graph.
+        @tparam MetaData      the regex_metadata instance that we're keeping track of for this nfa_graph.
         @tparam Stream      the stream of tokens we're parsing from.
         @tparam Result      the stream of graph nodes we're constructing.
      */
-    template<class Length, class Stream, class Result = token_stream<nfa_graph_node<graph_start_node>>>
+    template<class MetaData, class Stream, class Result = token_stream<nfa_graph_node<graph_start_node>>>
 	struct regex_parser;
 
     // Base case when the token stream runs out.
-	template<class Length, class A, class ...Nodes>
-    struct regex_parser<Length, token_stream<>, token_stream<A, Nodes...>> {
-        using type = to_nfa_graph_t<Length, typename A::template append<1>, Nodes...>;
+	template<class MetaData, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<>, token_stream<A, Nodes...>> {
+        using type = to_nfa_graph_t<MetaData, typename A::template append<1>, Nodes...>;
         using remainder = token_stream<>;
     };
 
     // Simple conjunction case, wrap the next token in a graph node, and 
     // add a connection to this new node from the previous node.
-	template<class Length, class Token, class ...Tokens, class A, class ...Nodes>
-    struct regex_parser<Length, token_stream<Token, Tokens...>, token_stream<A, Nodes...>> {
+	template<class MetaData, class Token, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<Token, Tokens...>, token_stream<A, Nodes...>> {
         using parser = regex_parser<
-			  typename Length::template add<typename Token::length>
+			  typename MetaData::template add<typename Token::metadata>
             , token_stream<Tokens...>
             , token_stream<nfa_graph_node<Token>
                          , typename A::template append<1> // Make connection to next node
@@ -853,10 +1005,10 @@ namespace kaixo {
 
     // Case for '*', make the previous node we parsed recursive, and
     // add a connection to the node before it such that it can optionally skip it.
-	template<class Length, class ...Tokens, class B, class A, class ...Nodes>
-    struct regex_parser<Length, token_stream<many_token, Tokens...>, token_stream<B, A, Nodes...>> {
+	template<class MetaData, class ...Tokens, class B, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<many_token, Tokens...>, token_stream<B, A, Nodes...>> {
         using parser = regex_parser<
-              typename Length::template add_many<typename B::operation::length>
+              typename MetaData::template add_many<typename B::operation::metadata>
             , token_stream<Tokens...>
             , token_stream<typename B::template append<0> // Make the node recurse
                          , typename A::template append<2> // Make the next node optional
@@ -871,10 +1023,10 @@ namespace kaixo {
     // parsing the next node precedence, to ensure the shortest possible match.
     // Also add a connection to the node before it such that it can optionally skip it,
     // prepend to give that case a higher precedence.
-	template<class Length, class ...Tokens, class B, class A, class ...Nodes>
-    struct regex_parser<Length, token_stream<lazy_many_token, Tokens...>, token_stream<B, A, Nodes...>> {
+	template<class MetaData, class ...Tokens, class B, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<lazy_many_token, Tokens...>, token_stream<B, A, Nodes...>> {
         using parser = regex_parser<
-              typename Length::template add_many<typename B::operation::length>
+              typename MetaData::template add_many<typename B::operation::metadata>
             , token_stream<Tokens...>
             , token_stream<typename B::template append<1>::template append<0> // Make the node recurse, but prefer the non-recursive path
                          , typename A::template prepend<2> // Make the next node optional, but make that the first path
@@ -886,10 +1038,10 @@ namespace kaixo {
     };
 
     // Case for '+', make the previous node we parsed recursive.
-	template<class Length, class ...Tokens, class Top, class ...Nodes>
-    struct regex_parser<Length, token_stream<some_token, Tokens...>, token_stream<Top, Nodes...>> {
+	template<class MetaData, class ...Tokens, class Top, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<some_token, Tokens...>, token_stream<Top, Nodes...>> {
         using parser = regex_parser<
-              typename Length::template add_some<typename Top::operation::length>
+              typename MetaData::template add_some<typename Top::operation::metadata>
             , token_stream<Tokens...>
             , token_stream<typename Top::template append<0> // Make the node recurse
                          , Nodes...>
@@ -901,10 +1053,10 @@ namespace kaixo {
 
     // Case for '+?', make the previous node we parsed recursive, but give
     // parsing the next node precedence, to ensure the shortest possible match.
-	template<class Length, class ...Tokens, class Top, class ...Nodes>
-    struct regex_parser<Length, token_stream<lazy_some_token, Tokens...>, token_stream<Top, Nodes...>> {
+	template<class MetaData, class ...Tokens, class Top, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<lazy_some_token, Tokens...>, token_stream<Top, Nodes...>> {
         using parser = regex_parser<
-              typename Length::template add_some<typename Top::operation::length>
+              typename MetaData::template add_some<typename Top::operation::metadata>
             , token_stream<Tokens...>
 			, token_stream<typename Top::template append<1>::template append<0> // Make the node recurse, but prefer the non-recursive path
                          , Nodes...>
@@ -916,10 +1068,10 @@ namespace kaixo {
 
     // Case for '?', add a connection to the node before the previous one such
     // that it can skip it, making it optional.
-	template<class Length, class ...Tokens, class B, class A, class ...Nodes>
-    struct regex_parser<Length, token_stream<optional_token, Tokens...>, token_stream<B, A, Nodes...>> {
+	template<class MetaData, class ...Tokens, class B, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<optional_token, Tokens...>, token_stream<B, A, Nodes...>> {
         using parser = regex_parser<
-              typename Length::template add_optional<typename B::operation::length>
+              typename MetaData::template add_optional<typename B::operation::metadata>
             , token_stream<Tokens...>
             , token_stream<B
                          , typename A::template append<2> // Make the next node optional
@@ -933,10 +1085,10 @@ namespace kaixo {
     // Case for '??', add a connection to the node before the previous one such
     // that it can skip it, making it optional. Prepend this, to give it a higher
     // precedence, to ensure shortest possible match.
-    template<class Length, class ...Tokens, class B, class A, class ...Nodes>
-    struct regex_parser<Length, token_stream<lazy_optional_token, Tokens...>, token_stream<B, A, Nodes...>> {
+    template<class MetaData, class ...Tokens, class B, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<lazy_optional_token, Tokens...>, token_stream<B, A, Nodes...>> {
         using parser = regex_parser<
-              typename Length::template add_optional<typename B::operation::length>
+              typename MetaData::template add_optional<typename B::operation::metadata>
             , token_stream<Tokens...>
             , token_stream<B
                          , typename A::template prepend<2> // Make the next node optional, and prefer no match
@@ -951,19 +1103,19 @@ namespace kaixo {
     // And then keeps parsing the rest to make another sub-graph. It then combines these 
     // 2 sub-graphs in such a way that it parses either one or the other, and continues
     // parsing with any remaining tokens.
-	template<class Length, class Token, class ...Tokens, class Node, class ...Nodes>
-    struct regex_parser<Length, token_stream<disjunction_token, Token, Tokens...>, token_stream<Node, Nodes...>> {
-        using nested = regex_parser<regex_length<0, 0>, token_stream<Token, Tokens...>>;
+	template<class MetaData, class Token, class ...Tokens, class Node, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<disjunction_token, Token, Tokens...>, token_stream<Node, Nodes...>> {
+        using nested = regex_parser<regex_metadata<0, 0, MetaData::group_counter>, token_stream<Token, Tokens...>>;
 
-        using a = to_nfa_graph_t<Length, typename Node::template append<1>, Nodes...>;
+        using a = to_nfa_graph_t<MetaData, typename Node::template append<1>, Nodes...>;
 		using b = typename nested::type;
 
-        using combined_length = typename a::length::template combine<typename b::length>;
+        using combined_metadata = typename a::metadata::template combine<typename b::metadata>;
 
         using parser = regex_parser<
-              combined_length
+              combined_metadata
             , typename nested::remainder
-            , token_stream<nfa_graph_node<nfa_graph<combined_length
+            , token_stream<nfa_graph_node<nfa_graph<combined_metadata
                                                   , nfa_graph_node<graph_start_node, 1, 2>
                                                   , nfa_graph_node<a, 2>
                                                   , nfa_graph_node<b, 1>>>
@@ -974,15 +1126,15 @@ namespace kaixo {
         using remainder = typename parser::remainder;
     };
 
-    // Case for nested expression; lookaround assertions, or a group capture.
+    // Case for nested expression; lookaround assertions, or a non-capturing group.
     // Just keeps parsing until it finds the end of the nested expression, and wraps it
     // in a sub-graph.
-	template<class Length, template<class> class Nested, class ...Tokens, class A, class ...Nodes>
-    struct regex_parser<Length, token_stream<nested_graph_token<Nested>, Tokens...>, token_stream<A, Nodes...>> {
-        using nested = regex_parser<regex_length<0, 0>, token_stream<Tokens...>>;
+	template<class MetaData, template<class> class Nested, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<nested_graph_token<Nested>, Tokens...>, token_stream<A, Nodes...>> {
+        using nested = regex_parser<regex_metadata<0, 0, MetaData::group_counter>, token_stream<Tokens...>>;
 
         using parser = regex_parser<
-              typename Length::template add<typename Nested<typename nested::type>::length>
+              typename MetaData::template add<typename Nested<typename nested::type>::metadata>
             , typename nested::remainder
             , token_stream<nfa_graph_node<Nested<typename nested::type>>
 			             , typename A::template append<1> // Make connection to next node
@@ -993,21 +1145,39 @@ namespace kaixo {
         using remainder = typename parser::remainder;
     };
 
+    // Case for capture group. Just keeps parsing until it finds the end of the nested expression, 
+    // and wraps it in a sub-graph. Also increments the metadata group counter.
+	template<class MetaData, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<capture_group_token, Tokens...>, token_stream<A, Nodes...>> {
+        using nested = regex_parser<regex_metadata<0, 0, MetaData::group_counter + 1>, token_stream<Tokens...>>;
+
+        using parser = regex_parser<
+              typename MetaData::template add<typename nested::type::metadata>
+            , typename nested::remainder
+            , token_stream<nfa_graph_node<typename nested::type::template with_group<MetaData::group_counter>>
+			             , typename A::template append<1> // Make connection to next node
+                         , Nodes...>
+        >;
+
+        using type = typename parser::type;
+        using remainder = typename parser::remainder;
+    };
+
     // End-case for nested expressions. Stops parsing and sets the remainder.
-	template<class Length, class ...Tokens, class A, class ...Nodes>
-    struct regex_parser<Length, token_stream<right_parenthesis_token, Tokens...>, token_stream<A, Nodes...>> {
-        using type = to_nfa_graph_t<Length, typename A::template append<1>, Nodes...>;
+	template<class MetaData, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<right_parenthesis_token, Tokens...>, token_stream<A, Nodes...>> {
+        using type = to_nfa_graph_t<MetaData, typename A::template append<1>, Nodes...>;
         using remainder = token_stream<Tokens...>;
     };
 
     // Case for a user-defined character class. Uses the character_class_regex_parser to 
     // parse the character class, and then continues like normal.
-	template<class Length, class ...Tokens, class A, class ...Nodes>
-    struct regex_parser<Length, token_stream<begin_character_class_token, Tokens...>, token_stream<A, Nodes...>> {
+	template<class MetaData, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<begin_character_class_token, Tokens...>, token_stream<A, Nodes...>> {
         using nested = character_class_regex_parser<token_stream<Tokens...>>;
 
         using parser = regex_parser<
-			  typename Length::template add<typename nested::type::length>
+			  typename MetaData::template add<typename nested::type::metadata>
             , typename nested::remainder
             , token_stream<nfa_graph_node<typename nested::type>
 			             , typename A::template append<1> // Make connection to next node
@@ -1020,12 +1190,12 @@ namespace kaixo {
 
     // Case for a negated user-defined character class, works the same as the normal one,
     // but wraps it in a negated_character_class_parser.
-	template<class Length, class ...Tokens, class A, class ...Nodes>
-    struct regex_parser<Length, token_stream<begin_negated_character_class_token, Tokens...>, token_stream<A, Nodes...>> {
+	template<class MetaData, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<begin_negated_character_class_token, Tokens...>, token_stream<A, Nodes...>> {
         using nested = character_class_regex_parser<token_stream<Tokens...>>;
 
         using parser = regex_parser<
-              typename Length::template add<typename nested::type::length>
+              typename MetaData::template add<typename nested::type::metadata>
             , typename nested::remainder
             , token_stream<nfa_graph_node<negated_character_class_parser<typename nested::type>>
 			             , typename A::template append<1> // Make connection to next node
@@ -1084,12 +1254,13 @@ namespace kaixo {
 			else if constexpr (C > 1 && A[0] == ']') return regex_tokenizer<A += 1, 0, Tokens..., end_character_class_token>{};
             else if constexpr (!InsideClass && A[0] == '(') {
 				if constexpr (A[1] == '?') {
-                     if constexpr (A[2] == '=') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<lookahead_assertion>>{};
+                     if constexpr (A[2] == ':') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<unit_token>>{};
+                     else if constexpr (A[2] == '=') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<lookahead_assertion>>{};
                      else if constexpr (A[2] == '!') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<negative_lookahead_assertion>>{};
                      else if constexpr (A[2] == '<' && A[3] == '=') return regex_tokenizer<A += 4, 0, Tokens..., nested_graph_token<lookbehind_assertion>>{};
                      else if constexpr (A[2] == '<' && A[3] == '!') return regex_tokenizer<A += 4, 0, Tokens..., nested_graph_token<negative_lookbehind_assertion>>{};
                 } else {
-					return regex_tokenizer<A += 1, 0, Tokens..., nested_graph_token<unit_token>>{};
+					return regex_tokenizer<A += 1, 0, Tokens..., capture_group_token>{};
                 }
             } else if constexpr (A[0] == '\\') {
                 if constexpr (A[1] == 'b') {
@@ -1144,7 +1315,7 @@ namespace kaixo {
         @tparam A           the regex string literal.
      */
     template<regex_literal A>
-    using regex = typename regex_parser<regex_length<0, 0>, typename regex_tokenizer<A>::type>::type;
+    using regex = typename regex_parser<regex_metadata<0, 0>, typename regex_tokenizer<A>::type>::type;
 
     // ------------------------------------------------
 

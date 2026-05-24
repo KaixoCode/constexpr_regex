@@ -95,7 +95,47 @@ static_assert(!kaixo::regex<"(?<=b)">::parse("a"));
 //static_assert(!kaixo::regex<"(?<=ab|xyz)c">::parse("xyzc"));   // <- Won't compile, because variable-length lookbehind is not allowed.
 static_assert(kaixo::regex<"(?<=foo)(bar|baz)+?(?=qux)(?!barbazqux)">::parse("foobarbazqux") == "barbaz");
 
-static_assert(kaixo::regex<"(ab|a(bc)+?)(x|y)*?z?([0-9]+|[A-F]+)?\.(foo|bar)+">::parse("abcbcxyyy1234.foobarbarZZ") == "abcbcxyyy1234.foobarbar");
+static_assert(kaixo::regex<"(ab|a(bc)+?)(x|y)*?z?([0-9]+|[A-F]+)?\\.(foo|bar)+">::parse("abcbcxyyy1234.foobarbarZZ") == "abcbcxyyy1234.foobarbar");
+
+// ------------------------------------------------
+
+constexpr auto r0 = kaixo::regex<"(ab)(cd)">::parse("abcd");
+static_assert(r0 == "abcd");
+static_assert(r0.groups.size() == 2);
+static_assert(r0.groups[0].match == "ab");
+static_assert(r0.groups[1].match == "cd");
+
+constexpr auto r1 = kaixo::regex<"()(abcd)">::parse("abcd");
+static_assert(r1 == "abcd");
+static_assert(r1.groups.size() == 2);
+static_assert(r1.groups[0].match == "");
+static_assert(r1.groups[1].match == "abcd");
+
+constexpr auto r2 = kaixo::regex<"(ab)+">::parse("abab");
+static_assert(r2 == "abab");
+static_assert(r2.groups.size() == 1);
+static_assert(r2.groups[0].match == "ab");
+
+constexpr auto r3 = kaixo::regex<"((a)+)">::parse("aa");
+static_assert(r3 == "aa");
+static_assert(r3.groups.size() == 2);
+static_assert(r3.groups[0].match == "aa");
+static_assert(r3.groups[1].match == "a");
+
+constexpr auto r4 = kaixo::regex<"((?:a)+)">::parse("aa");
+static_assert(r4 == "aa");
+static_assert(r4.groups.size() == 1);
+static_assert(r4.groups[0].match == "aa");
+
+constexpr auto r5 = kaixo::regex<"a(.*)b">::parse("axxxbxxb");
+static_assert(r5 == "axxxbxxb");
+static_assert(r5.groups.size() == 1);
+static_assert(r5.groups[0].match == "xxxbxx");
+
+constexpr auto r6 = kaixo::regex<"a(.*?)b">::parse("axxxbxxb");
+static_assert(r6 == "axxxb");
+static_assert(r6.groups.size() == 1);
+static_assert(r6.groups[0].match == "xxx");
 
 // ------------------------------------------------
 
