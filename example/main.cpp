@@ -155,10 +155,23 @@ static_assert(kaixo::regex<"\\w{2,}?b">::parse("aaabaab") == "aaab");
 static_assert(kaixo::regex<"\\w{3,}?b">::parse("aaabaab") == "aaab");
 static_assert(kaixo::regex<"\\w{4,}?b">::parse("aaabaab") == "aaabaab");
 
+static_assert(kaixo::regex<"\\w{0,2}b">::parse("b") == "b");
+static_assert(kaixo::regex<"\\w{0,4}b">::parse("abaab") == "abaab");
+static_assert(kaixo::regex<"\\w{1,4}b">::parse("abaab") == "abaab");
+static_assert(kaixo::regex<"\\w{2,5}b">::parse("aaabaab") == "aaab");
+static_assert(kaixo::regex<"\\w{3,6}b">::parse("aaabaab") == "aaabaab");
+static_assert(kaixo::regex<"\\w{4,6}b">::parse("aaabaab") == "aaabaab");
+
+static_assert(kaixo::regex<"\\w{0,2}?b">::parse("abaab") == "ab");
+static_assert(kaixo::regex<"\\w{1,4}?b">::parse("abaab") == "ab");
+static_assert(kaixo::regex<"\\w{1,4}?b">::parse("baab") == "baab");
+static_assert(kaixo::regex<"\\w{2,5}?b">::parse("aaabaab") == "aaab");
+static_assert(kaixo::regex<"\\w{3,6}?b">::parse("aaabaab") == "aaab");
+static_assert(kaixo::regex<"\\w{4,4}?b">::parse("aaabaab") == "abaab");
+
 // ------------------------------------------------
 
 int main() {
-
     using email_regex = kaixo::regex<"\\b([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}\\b)">;
 
     constexpr auto parsed = email_regex::parse("my email address is test@example.com");
