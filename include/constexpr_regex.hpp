@@ -347,7 +347,7 @@ namespace kaixo {
 		constexpr static std::size_t max = Max;
 		constexpr static std::size_t group_counter = GroupCounter;
 		constexpr static std::size_t group = Group;
-
+        
         /**
             Combine metadata, takes the min/max of both.
 
@@ -424,6 +424,36 @@ namespace kaixo {
 		using add_some = regex_metadata<
             min, // Token length was already added before we knew it was 'some'.
 			std::string_view::npos,
+            group_counter,
+            group
+        >;
+        
+        /**
+            Special case for a repeated token '{N}'. This is evaluated after
+            the token that's now repeated is already added.
+
+            @tparam Token       A token that's now marked as repeated.
+            @tparam N           number of repeats.
+         */
+        template<class Token, std::size_t N>
+		using add_repeat = regex_metadata< // Token length was already added before we knew it was repeated, so add N - 1 more.
+            min + Token::min * (N - 1), 
+			max + Token::max * (N - 1),
+            group_counter,
+            group
+        >;
+        
+        /**
+            Special case for a repeated token '{N,}'. This is evaluated after
+            the token that's now repeated is already added.
+
+            @tparam Token       A token that's now marked as repeated.
+            @tparam N           minimum number of repeats.
+         */
+        template<class Token, std::size_t N>
+		using add_min_repeat = regex_metadata< // Token length was already added before we knew it was repeated, so add N - 1 more.
+            min + Token::min * (N - 1),
+            std::string_view::npos,
             group_counter,
             group
         >;
@@ -634,6 +664,37 @@ namespace kaixo {
 		}
     };
 
+    /** 
+        Parses the parser A exactly N times.
+
+        @tparam A           the parser to repeat.
+        @tparam N           number of times to repeat.
+     */
+    template<class A, std::size_t N>
+    struct repeat_parser {
+        using metadata = regex_metadata<A::metadata::min * N, A::metadata::max * N, A::metadata::group_counter, A::metadata::group>;
+        using result_type = decltype(A::parse(std::declval<context&>()));
+
+        static constexpr result_type parse(context& ctx) {
+            if constexpr (N == 0) return ctx.value.substr(0, 0);
+            else {
+                auto _ = ctx.backup();
+
+                auto final_result = A::parse(ctx);
+                if (!final_result) return _.revert();
+
+                for (std::size_t i = 1; i < N; ++i) {
+                    auto result = A::parse(ctx);
+                    if (!result) return _.revert();
+
+                    final_result = result_type::merge(final_result, result);
+                }
+
+                return final_result;
+            }
+        }
+    };
+
     // ------------------------------------------------
 
     /**
@@ -676,6 +737,14 @@ namespace kaixo {
     struct nfa_graph_node {
         using operation = Operation;
 		using outs = std::index_sequence<Outs...>;
+
+        /**
+            Change the graph node to have a new operation with the same outs.
+
+            @tparam New     new parser for this node.
+         */
+        template<class New>
+        using change = nfa_graph_node<New, Outs...>;
 
         /** 
             Append a possible next node to the list. This means it will
@@ -878,24 +947,52 @@ namespace kaixo {
         List of dummy classes that are used as tokens during parsing.
      */
 
-    struct many_token {};
-    struct some_token {};
-    struct optional_token {};
-    struct lazy_many_token {};
-    struct lazy_some_token {};
-    struct lazy_optional_token {};
-    struct disjunction_token {};
-    struct right_parenthesis_token {};
-    struct begin_character_class_token {};
-    struct begin_negated_character_class_token {};
-    struct end_character_class_token {};
-    struct capture_group_token {};
+    struct many_token;
+    struct some_token;
+    struct optional_token;
+    struct lazy_many_token;
+    struct lazy_some_token;
+    struct lazy_optional_token;
+    struct disjunction_token;
+    struct right_parenthesis_token;
+    struct begin_character_class_token;
+    struct begin_negated_character_class_token;
+    struct end_character_class_token;
+    struct capture_group_token;
 
     template<template<class> class Nested>
-    struct nested_graph_token {}; // Signals nested NFA graph.
+    struct nested_graph_token; // Signals nested NFA graph.
 
     template<class A>
     using unit_token = A; // Used as unit in nested_graph_token.
+
+    template<std::size_t Min, std::size_t Max, bool Lazy>
+    struct match_repeat_token {
+        using is_match_repeat_token_specifier = int;
+        constexpr static std::size_t min = Min;
+        constexpr static std::size_t max = Max;
+        constexpr static bool lazy = Lazy;
+    };
+
+    template<class Ty> // {N}
+    concept match_repeat_exact_token = Ty::min == Ty::max && Ty::max != std::string_view::npos &&
+        requires() { typename Ty::is_match_repeat_token_specifier; };
+
+    template<class Ty> // {N,}
+    concept match_repeat_more_token = !Ty::lazy && Ty::max == std::string_view::npos && 
+        requires() { typename Ty::is_match_repeat_token_specifier; };
+
+    template<class Ty> // {N,M}
+    concept match_repeat_range_token = !Ty::lazy && Ty::min != Ty::max && Ty::max != std::string_view::npos &&
+        requires() { typename Ty::is_match_repeat_token_specifier; };
+
+    template<class Ty> // {N,}?
+    concept lazy_match_repeat_more_token = Ty::lazy && Ty::max == std::string_view::npos && 
+        requires() { typename Ty::is_match_repeat_token_specifier; };
+
+    template<class Ty> // {N,M}?
+    concept lazy_match_repeat_range_token = Ty::lazy && Ty::min != Ty::max && Ty::max != std::string_view::npos &&
+        requires() { typename Ty::is_match_repeat_token_specifier; };
 
     // ------------------------------------------------
 
@@ -1206,106 +1303,265 @@ namespace kaixo {
         using remainder = typename parser::remainder;
     };
 
+    // Match range case: '{N}', match exactly N times.
+    template<class MetaData, match_repeat_exact_token N, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<N, Tokens...>, token_stream<A, Nodes...>> {
+        using parser = regex_parser<
+              typename MetaData::template add_repeat<typename A::operation::metadata, N::min>
+            , token_stream<Tokens...>
+            , token_stream<typename A::template change<repeat_parser<typename A::operation, N::min>>
+                         , Nodes...>
+        >;
+
+        using type = typename parser::type;
+        using remainder = typename parser::remainder;
+    };
+
+    // Match range case: '{N,}', match N or more times.
+    template<class MetaData, match_repeat_more_token N, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<N, Tokens...>, token_stream<A, Nodes...>> {
+        using parser = regex_parser<
+              typename MetaData::template add_min_repeat<typename A::operation::metadata, N::min>
+            , token_stream<Tokens...>
+            , token_stream<typename A::template append<0> // Make recursive
+                         , typename A
+                            ::template change<repeat_parser<typename A::operation, N::min>>
+                            ::template append<1>::template append<2> // Make next node optional
+                         , Nodes...>
+        >;
+
+        using type = typename parser::type;
+        using remainder = typename parser::remainder;
+    };
+
+    // Match range case: '{N,}?', lazy match N or more times.
+    template<class MetaData, lazy_match_repeat_more_token N, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<N, Tokens...>, token_stream<A, Nodes...>> {
+        using parser = regex_parser<
+              typename MetaData::template add_min_repeat<typename A::operation::metadata, N::min>
+            , token_stream<Tokens...>
+            , token_stream<typename A::template append<1>::template append<0> // Make recursive
+                         , typename A
+                            ::template change<repeat_parser<typename A::operation, N::min>>
+                            ::template append<2>::template append<1> // Make next node optional
+                         , Nodes...>
+        >;
+
+        using type = typename parser::type;
+        using remainder = typename parser::remainder;
+    };
+
+    // Match range case: '{N,M}', match between N and M.
+    template<class MetaData, match_repeat_range_token N, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<N, Tokens...>, token_stream<A, Nodes...>> {
+        static_assert(N::min != N::min, "'{N,M}' match range not supported");
+        using parser = regex_parser<
+              typename MetaData::template add_repeat<typename A::operation::metadata, N::min>
+            , token_stream<Tokens...>
+            , token_stream<typename A::template change<repeat_parser<typename A::operation, N::min>>
+                         , Nodes...>
+        >;
+
+        using type = typename parser::type;
+        using remainder = typename parser::remainder;
+    };
+
+    // Match range case: '{N,M}?', lazy match between N and M.
+    template<class MetaData, lazy_match_repeat_range_token N, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<N, Tokens...>, token_stream<A, Nodes...>> {
+        static_assert(N::min != N::min, "'{N,M}?' match range not supported");
+        using parser = regex_parser<
+              typename MetaData::template add_repeat<typename A::operation::metadata, N::min>
+            , token_stream<Tokens...>
+            , token_stream<typename A::template change<repeat_parser<typename A::operation, N::min>>
+                         , Nodes...>
+        >;
+
+        using type = typename parser::type;
+        using remainder = typename parser::remainder;
+    };
+
     // ------------------------------------------------
 
-    /**
-        The regex tokenizer, converts a regex literal into a stream of tokens.
+    template<regex_literal A, int C = 0, class ...Tokens>
+    consteval static auto regex_tokenizer();
+
+    struct regex_number_parser_result {
+        std::size_t result;
+        std::size_t characters_parsed;
+    };
+
+    template<regex_literal A, std::size_t N = 0, std::size_t I = 0>
+    consteval static regex_number_parser_result regex_number_parser() {
+        if constexpr (is_digit_char(A[0])) {
+            return regex_number_parser<A += 1, N * 10 + (A[0] - '0'), I + 1>();
+        } else {
+            return regex_number_parser_result{ .result = N, .characters_parsed = I };
+        }
+    }
+
+    template<regex_literal A, class ...Tokens>
+    consteval static auto regex_match_range_tokenizer() {
+        constexpr auto number1 = regex_number_parser<A>();
+        static_assert(number1.characters_parsed != 0, "No number specified in repeat.");
+
+        if constexpr (A[number1.characters_parsed] == ',') {
+            if constexpr (A[number1.characters_parsed + 1] == '}') {
+                if constexpr (A[number1.characters_parsed + 2] == '?') {
+                    if constexpr (number1.result == 0) {
+                        // case: {0,}?
+                        return regex_tokenizer<A += (number1.characters_parsed + 3), 0, Tokens..., lazy_many_token>();
+                    } else if constexpr (number1.result == 1) {
+                        // case: {1,}?
+                        return regex_tokenizer<A += (number1.characters_parsed + 3), 0, Tokens..., lazy_some_token>();
+                    } else {
+                        // case: {N,}?
+                        return regex_tokenizer<A += (number1.characters_parsed + 3), 0, Tokens...,
+                            match_repeat_token<number1.result, std::string_view::npos, true>>();
+                    }
+                } else { 
+                    if constexpr (number1.result == 0) {
+                        // case: {0,}
+                        return regex_tokenizer<A += (number1.characters_parsed + 2), 0, Tokens..., many_token>();
+                    } else if constexpr (number1.result == 1) {
+                        // case: {1,}
+                        return regex_tokenizer<A += (number1.characters_parsed + 2), 0, Tokens..., some_token>();
+                    } else {
+                        // case: {N,}
+                        return regex_tokenizer<A += (number1.characters_parsed + 2), 0, Tokens...,
+                            match_repeat_token<number1.result, std::string_view::npos, false>>();
+                    }
+                }
+            } else {
+                constexpr auto number2 = regex_number_parser<A += (number1.characters_parsed + 1)>();
+                static_assert(number2.characters_parsed != 0, "Invalid repeat range.");
+                static_assert(A[number1.characters_parsed + number2.characters_parsed + 1] == '}', "Missing closing '}' in repeat.");
+                static_assert(number1.result <= number2.result, "The first number must be smaller or equal to the second number in a repeat.");
+
+                if constexpr (A[number1.characters_parsed + number2.characters_parsed + 2] == '?') { 
+                    // case: {N,M}?
+                    return regex_tokenizer<A += (number1.characters_parsed + number2.characters_parsed + 3), 0, Tokens..., 
+                        match_repeat_token<number1.result, number2.result, true>>();
+                } else { 
+                    // case: {N,M}
+                    return regex_tokenizer<A += (number1.characters_parsed + number2.characters_parsed + 2), 0, Tokens...,
+                        match_repeat_token<number1.result, number2.result, false>>();
+                }
+            }
+        } else {
+            static_assert(A[number1.characters_parsed] == '}', "Missing closing '}' in repeat.");
+
+            if constexpr (A[number1.characters_parsed + 1] == '?') { 
+                // case: {N}?
+                return regex_tokenizer<A += (number1.characters_parsed + 2), 0, Tokens..., 
+                    match_repeat_token<number1.result, number1.result, true>>();
+            } else { 
+                // case: {N}
+                return regex_tokenizer<A += (number1.characters_parsed + 1), 0, Tokens...,
+                    match_repeat_token<number1.result, number1.result, false>>();
+            }
+        }
+    }
+
+    /** The regex tokenizer, converts a regex literal into a stream of tokens.
 
         @tparam A           the regex string literal.
-        @tparam C           a counter that keeps track of number of tokens since 
+        @tparam C           a counter that keeps track of number of tokens since
                             a user-defined character class opened. This is necessary
                             for specific tokenizing cases.
         @tparam ...Tokens   the resulting list of tokens.
-     */
-    template<regex_literal A, int C = 0, class ...Tokens>
-    struct regex_tokenizer {
-        consteval static auto tokenize() {
-            constexpr bool InsideClass = C > 0; // Inside a user-defined character class?
-            constexpr int Next = InsideClass ? C + 1 : 0; // Next index in user-defined character class.
-            // It keeps track of the index in the user-defined character class because
-            // a character class cannot be empty, so it will consume a ']' as a character
-            // if it's still empty, instead of closing the class.
+        */
+    template<regex_literal A, int C, class ...Tokens>
+    consteval static auto regex_tokenizer() {
+        constexpr bool InsideClass = C > 0; // Inside a user-defined character class?
+        constexpr int Next = InsideClass ? C + 1 : 0; // Next index in user-defined character class.
+        // It keeps track of the index in the user-defined character class because
+        // a character class cannot be empty, so it will consume a ']' as a character
+        // if it's still empty, instead of closing the class.
 
-            if constexpr (A.empty()) return std::type_identity<token_stream<Tokens...>>{};
-            else if constexpr (InsideClass && A.size() > 2 && A[1] == '-' && A[2] != ']') {
-                return regex_tokenizer<A += 3, Next, Tokens..., character_range_parser<A[0], A[2]>>{};
-            }
-            else if constexpr (!InsideClass && A[0] == '*') {
-                if constexpr (A[1] == '?') return regex_tokenizer<A += 2, 0, Tokens..., lazy_many_token>{};
-                else return regex_tokenizer<A += 1, 0, Tokens..., many_token>{};
-            }
-            else if constexpr (!InsideClass && A[0] == '+') {
-                if constexpr (A[1] == '?') return regex_tokenizer<A += 2, 0, Tokens..., lazy_some_token>{};
-                else return regex_tokenizer<A += 1, 0, Tokens..., some_token>{};
-            }
-            else if constexpr (!InsideClass && A[0] == '?') {
-                if constexpr (A[1] == '?') return regex_tokenizer<A += 2, 0, Tokens..., lazy_optional_token>{};
-                else return regex_tokenizer<A += 1, 0, Tokens..., optional_token>{};
-            }
-            else if constexpr (!InsideClass && A[0] == '.') return regex_tokenizer<A += 1, 0, Tokens..., wildcard_character_parser>{};
-            else if constexpr (!InsideClass && A[0] == '^') return regex_tokenizer<A += 1, 0, Tokens..., boundary_assertion<'^'>>{};
-            else if constexpr (!InsideClass && A[0] == '$') return regex_tokenizer<A += 1, 0, Tokens..., boundary_assertion<'$'>>{};
-            else if constexpr (!InsideClass && A[0] == '|') return regex_tokenizer<A += 1, 0, Tokens..., disjunction_token>{};
-            else if constexpr (!InsideClass && A[0] == ')') return regex_tokenizer<A += 1, 0, Tokens..., right_parenthesis_token>{};
-            else if constexpr (!InsideClass && A[0] == '[') {
-				if constexpr (A[1] == '^') return regex_tokenizer<A += 2, 1, Tokens..., begin_negated_character_class_token>{};
-                else return regex_tokenizer<A += 1, 1, Tokens..., begin_character_class_token>{};
-            }
-			else if constexpr (C > 1 && A[0] == ']') return regex_tokenizer<A += 1, 0, Tokens..., end_character_class_token>{};
-            else if constexpr (!InsideClass && A[0] == '(') {
-				if constexpr (A[1] == '?') {
-                     if constexpr (A[2] == ':') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<unit_token>>{};
-                     else if constexpr (A[2] == '=') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<lookahead_assertion>>{};
-                     else if constexpr (A[2] == '!') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<negative_lookahead_assertion>>{};
-                     else if constexpr (A[2] == '<' && A[3] == '=') return regex_tokenizer<A += 4, 0, Tokens..., nested_graph_token<lookbehind_assertion>>{};
-                     else if constexpr (A[2] == '<' && A[3] == '!') return regex_tokenizer<A += 4, 0, Tokens..., nested_graph_token<negative_lookbehind_assertion>>{};
-                } else {
-					return regex_tokenizer<A += 1, 0, Tokens..., capture_group_token>{};
-                }
-            } else if constexpr (A[0] == '\\') {
-                if constexpr (A[1] == 'b') {
-                    if constexpr (InsideClass) regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\b'>>{};
-                    else return regex_tokenizer<A += 2, 0, Tokens..., boundary_assertion<'b'>>{};
-                }
-                else if constexpr (A[1] == 'B') return regex_tokenizer<A += 2, Next, Tokens..., boundary_assertion<'B'>>{};
-                else if constexpr (A[1] == 's') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'s'>>{};
-                else if constexpr (A[1] == 'S') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'S'>>{};
-                else if constexpr (A[1] == 'd') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'d'>>{};
-                else if constexpr (A[1] == 'D') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'D'>>{};
-                else if constexpr (A[1] == 'w') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'w'>>{};
-                else if constexpr (A[1] == 'W') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'W'>>{};
-                else if constexpr (A[1] == 'X') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'X'>>{};
-                else if constexpr (A[1] == 'C') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'C'>>{};
-                else if constexpr (A[1] == 'R') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'R'>>{};
-                else if constexpr (A[1] == 'N') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'N'>>{};
-                else if constexpr (A[1] == 'n') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\n'>>{};
-                else if constexpr (A[1] == 't') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\t'>>{};
-                else if constexpr (A[1] == '0') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\0'>>{};
-                else if constexpr (A[1] == 'r') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\r'>>{};
-                else if constexpr (A[1] == 'f') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\f'>>{};
-                else if constexpr (A[1] == 'a') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\a'>>{};
-                else if constexpr (A[1] == 'v') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\v'>>{};
-                else if constexpr (A[1] == '.') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'.'>>{};
-                else if constexpr (A[1] == '^') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'^'>>{};
-                else if constexpr (A[1] == '$') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'$'>>{};
-                else if constexpr (A[1] == '+') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'+'>>{};
-                else if constexpr (A[1] == '*') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'*'>>{};
-                else if constexpr (A[1] == '?') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'?'>>{};
-                else if constexpr (A[1] == '(') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'('>>{};
-                else if constexpr (A[1] == ')') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<')'>>{};
-                else if constexpr (A[1] == '[') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'['>>{};
-                else if constexpr (A[1] == ']') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<']'>>{};
-                else if constexpr (A[1] == '{') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'{'>>{};
-                else if constexpr (A[1] == '}') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'}'>>{};
-                else if constexpr (A[1] == '\\') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\\'>>{};
-                else if constexpr (A[1] == '|') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'|'>>{};
-            } else {
-                return regex_tokenizer<A += 1, Next, Tokens..., single_character_parser<A[0]>>{};
-            }
+        if constexpr (A.empty()) return std::type_identity<token_stream<Tokens...>>{};
+        else if constexpr (!InsideClass && A[0] == '{') {
+            return regex_match_range_tokenizer<A += 1, Tokens...>();
         }
+        else if constexpr (InsideClass && A.size() > 2 && A[1] == '-' && A[2] != ']') {
+            return regex_tokenizer<A += 3, Next, Tokens..., character_range_parser<A[0], A[2]>>();
+        }
+        else if constexpr (!InsideClass && A[0] == '*') {
+            if constexpr (A[1] == '?') return regex_tokenizer<A += 2, 0, Tokens..., lazy_many_token>();
+            else return regex_tokenizer<A += 1, 0, Tokens..., many_token>();
+        }
+        else if constexpr (!InsideClass && A[0] == '+') {
+            if constexpr (A[1] == '?') return regex_tokenizer<A += 2, 0, Tokens..., lazy_some_token>();
+            else return regex_tokenizer<A += 1, 0, Tokens..., some_token>();
+        }
+        else if constexpr (!InsideClass && A[0] == '?') {
+            if constexpr (A[1] == '?') return regex_tokenizer<A += 2, 0, Tokens..., lazy_optional_token>();
+            else return regex_tokenizer<A += 1, 0, Tokens..., optional_token>();
+        }
+        else if constexpr (!InsideClass && A[0] == '.') return regex_tokenizer<A += 1, 0, Tokens..., wildcard_character_parser>();
+        else if constexpr (!InsideClass && A[0] == '^') return regex_tokenizer<A += 1, 0, Tokens..., boundary_assertion<'^'>>();
+        else if constexpr (!InsideClass && A[0] == '$') return regex_tokenizer<A += 1, 0, Tokens..., boundary_assertion<'$'>>();
+        else if constexpr (!InsideClass && A[0] == '|') return regex_tokenizer<A += 1, 0, Tokens..., disjunction_token>();
+        else if constexpr (!InsideClass && A[0] == ')') return regex_tokenizer<A += 1, 0, Tokens..., right_parenthesis_token>();
+        else if constexpr (!InsideClass && A[0] == '[') {
+			if constexpr (A[1] == '^') return regex_tokenizer<A += 2, 1, Tokens..., begin_negated_character_class_token>();
+            else return regex_tokenizer<A += 1, 1, Tokens..., begin_character_class_token>();
+        }
+		else if constexpr (C > 1 && A[0] == ']') return regex_tokenizer<A += 1, 0, Tokens..., end_character_class_token>();
+        else if constexpr (!InsideClass && A[0] == '(') {
+			if constexpr (A[1] == '?') {
+                    if constexpr (A[2] == ':') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<unit_token>>();
+                    else if constexpr (A[2] == '=') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<lookahead_assertion>>();
+                    else if constexpr (A[2] == '!') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<negative_lookahead_assertion>>();
+                    else if constexpr (A[2] == '<' && A[3] == '=') return regex_tokenizer<A += 4, 0, Tokens..., nested_graph_token<lookbehind_assertion>>();
+                    else if constexpr (A[2] == '<' && A[3] == '!') return regex_tokenizer<A += 4, 0, Tokens..., nested_graph_token<negative_lookbehind_assertion>>();
+            } else {
+				return regex_tokenizer<A += 1, 0, Tokens..., capture_group_token>();
+            }
+        } else if constexpr (A[0] == '\\') {
+            if constexpr (A[1] == 'b') {
+                if constexpr (InsideClass) regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\b'>>();
+                else return regex_tokenizer<A += 2, 0, Tokens..., boundary_assertion<'b'>>();
+            }
+            else if constexpr (A[1] == 'B') return regex_tokenizer<A += 2, Next, Tokens..., boundary_assertion<'B'>>();
+            else if constexpr (A[1] == 's') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'s'>>();
+            else if constexpr (A[1] == 'S') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'S'>>();
+            else if constexpr (A[1] == 'd') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'d'>>();
+            else if constexpr (A[1] == 'D') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'D'>>();
+            else if constexpr (A[1] == 'w') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'w'>>();
+            else if constexpr (A[1] == 'W') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'W'>>();
+            else if constexpr (A[1] == 'X') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'X'>>();
+            else if constexpr (A[1] == 'C') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'C'>>();
+            else if constexpr (A[1] == 'R') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'R'>>();
+            else if constexpr (A[1] == 'N') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'N'>>();
+            else if constexpr (A[1] == 'n') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\n'>>();
+            else if constexpr (A[1] == 't') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\t'>>();
+            else if constexpr (A[1] == '0') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\0'>>();
+            else if constexpr (A[1] == 'r') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\r'>>();
+            else if constexpr (A[1] == 'f') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\f'>>();
+            else if constexpr (A[1] == 'a') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\a'>>();
+            else if constexpr (A[1] == 'v') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\v'>>();
+            else if constexpr (A[1] == '.') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'.'>>();
+            else if constexpr (A[1] == '^') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'^'>>();
+            else if constexpr (A[1] == '$') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'$'>>();
+            else if constexpr (A[1] == '+') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'+'>>();
+            else if constexpr (A[1] == '*') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'*'>>();
+            else if constexpr (A[1] == '?') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'?'>>();
+            else if constexpr (A[1] == '(') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'('>>();
+            else if constexpr (A[1] == ')') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<')'>>();
+            else if constexpr (A[1] == '[') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'['>>();
+            else if constexpr (A[1] == ']') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<']'>>();
+            else if constexpr (A[1] == '{') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'{'>>();
+            else if constexpr (A[1] == '}') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'}'>>();
+            else if constexpr (A[1] == '\\') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\\'>>();
+            else if constexpr (A[1] == '|') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'|'>>();
+        } else {
+            return regex_tokenizer<A += 1, Next, Tokens..., single_character_parser<A[0]>>();
+        }
+    }
 
-        using type = decltype(tokenize())::type;
-    };
+    template<regex_literal A>
+    using regex_tokenizer_t = decltype(regex_tokenizer<A>())::type;
 
     // ------------------------------------------------
 
@@ -1315,7 +1571,7 @@ namespace kaixo {
         @tparam A           the regex string literal.
      */
     template<regex_literal A>
-    using regex = typename regex_parser<regex_metadata<0, 0>, typename regex_tokenizer<A>::type>::type;
+    using regex = typename regex_parser<regex_metadata<0, 0>, regex_tokenizer_t<A>>::type;
 
     // ------------------------------------------------
 
