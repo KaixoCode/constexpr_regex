@@ -34,6 +34,7 @@ namespace kaixo {
         consteval regex_literal operator+=(std::size_t n) const { return { value, offset + n }; }
         consteval bool empty() const { return std::string_view{ value + offset, N - offset - 1 }.empty(); }
         consteval std::size_t size() const { return std::string_view{ value + offset, N - offset - 1 }.size(); }
+        consteval std::string_view view() const { return std::string_view{ value + offset, N - offset - 1 }; }
 
         std::size_t offset = 0; // Start offset in the literal. Used during tokenizing.
         char value[N]{};
@@ -1657,13 +1658,9 @@ namespace kaixo {
 
         @returns number of characters parsed
      */
-    template<regex_literal A, std::size_t N = 0>
+    template<regex_literal A>
     consteval static std::size_t regex_comment_parser() {
-        if constexpr (A[0] == ')') {
-            return N + 1;
-        } else {
-            return regex_comment_parser<A += 1, N + 1>();
-        }
+        return A.view().find_first_of(")") + 1;
     }
 
     /** Tokenize a match_repeat_token.
