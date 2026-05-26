@@ -955,6 +955,7 @@ namespace kaixo {
     struct capture_group_token;
     struct non_capturing_group_token;
     struct atomic_group_token;
+    struct comment_group_token;
 
     template<template<class> class Assertion>
     struct assertion_token;
@@ -1649,6 +1650,22 @@ namespace kaixo {
         }
     }
 
+    /** Consume a comment from a regex string literal.
+    
+        @tparam A           the regex string literal to parse from.
+        @tparam I           character counter, used in recursion.
+
+        @returns number of characters parsed
+     */
+    template<regex_literal A, std::size_t N = 0>
+    consteval static std::size_t regex_comment_parser() {
+        if constexpr (A[0] == ')') {
+            return N + 1;
+        } else {
+            return regex_comment_parser<A += 1, N + 1>();
+        }
+    }
+
     /** Tokenize a match_repeat_token.
         
         @tparam A           the regex string literal.
@@ -1784,7 +1801,7 @@ namespace kaixo {
                 if constexpr (A[2] == ':') return regex_tokenizer<A += 3, 0, Tokens..., non_capturing_group_token>();
                 else if constexpr (A[2] == '>') return regex_tokenizer<A += 3, 0, Tokens..., atomic_group_token>();
                 else if constexpr (A[2] == '|') static_assert(A[2] != '|', "Duplicate/reset subpattern group number group not supported!");
-                else if constexpr (A[2] == '#') static_assert(A[2] != '#', "Comment group not supported!");
+                else if constexpr (A[2] == '#') return regex_tokenizer<A += regex_comment_parser<A>(), 0, Tokens...>();
                 else if constexpr (A[2] == '=') return regex_tokenizer<A += 3, 0, Tokens..., assertion_token<lookahead_assertion>>();
                 else if constexpr (A[2] == '!') return regex_tokenizer<A += 3, 0, Tokens..., assertion_token<negative_lookahead_assertion>>();
                 else if constexpr (A[2] == '<' && A[3] == '=') return regex_tokenizer<A += 4, 0, Tokens..., assertion_token<lookbehind_assertion>>();

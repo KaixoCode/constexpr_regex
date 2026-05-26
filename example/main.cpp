@@ -177,6 +177,8 @@ static_assert(kaixo::regex<"(?:a{1,2}?){1,2}?">::parse("aaaaaaaa") == "a");
 static_assert(!kaixo::regex<"(?>.+)a">::parse("aaaaaa"));
 static_assert(kaixo::regex<"(?>b+?)a">::parse("bbbbbbbba") == "ba");
 
+static_assert(kaixo::regex<"(?#parse the character 'a')a">::parse("a") == "a");
+
 // ------------------------------------------------
 
 int main() {
