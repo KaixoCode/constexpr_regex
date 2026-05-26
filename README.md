@@ -7,14 +7,16 @@ containing a regex expression. See the example project for some examples.
 #include "constexpr_regex.hpp"
 
 int main() {
-    using email_regex = kaixo::regex<"\\b([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}\\b)">;
+    using email_regex = kaixo::regex<"\\b(?'username'[a-zA-Z0-9._%+-]+)@(?'domain'[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}\\b)">;
 
     constexpr auto parsed = email_regex::parse("my email address is test@example.com");
-    constexpr auto username = parsed.groups[0].match;
-    constexpr auto domain   = parsed.groups[1].match;
+    constexpr auto username = parsed.groups["username"].match;
+    constexpr auto domain   = parsed.groups["domain"].match;
 
     static_assert(parsed   == "test@example.com");
     static_assert(username == "test");
     static_assert(domain   == "example.com");
+
+    return 0;
 }
 ```
