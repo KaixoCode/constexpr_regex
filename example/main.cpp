@@ -229,6 +229,9 @@ static_assert(kaixo::regex<"\\d{1,}+.">::parse("1a") == "1a");
 
 static_assert(!kaixo::regex<"\\d{0,4}+.">::parse("1111"));
 static_assert(kaixo::regex<"\\d{0,}+.">::parse("1111a") == "1111a");
+static_assert(kaixo::regex<"(?:a{1}+)?a">::parse("a") == "a");
+static_assert(kaixo::regex<"(?:a{10,}+)?a">::parse("a") == "a");
+static_assert(kaixo::regex<"(?:a++)?a">::parse("a") == "a");
 
 // ------------------------------------------------
 
