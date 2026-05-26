@@ -1637,18 +1637,21 @@ namespace kaixo {
     /** Parse a number from a regex string literal.
     
         @tparam A           the regex string literal to parse from.
-        @tparam N           the resulting integer, used in recursion.
-        @tparam I           character counter, used in recursion.
 
         @returns regex_number_parser_result
      */
-    template<regex_literal A, std::size_t N = 0, std::size_t I = 0>
+    template<regex_literal A>
     consteval static regex_number_parser_result regex_number_parser() {
-        if constexpr (is_digit_char(A[0])) {
-            return regex_number_parser<A += 1, N * 10 + (A[0] - '0'), I + 1>();
-        } else {
-            return regex_number_parser_result{ .result = N, .characters_parsed = I };
+        std::string_view view = A.view();
+        regex_number_parser_result result{};
+        while (is_digit_char(view[0])) {
+            ++result.characters_parsed;
+            result.result *= 10;
+            result.result += view[0] - '0';
+            view = view.substr(1);
         }
+
+        return result;
     }
 
     /** Consume a comment from a regex string literal.
