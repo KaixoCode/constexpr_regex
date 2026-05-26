@@ -140,7 +140,14 @@ static_assert(r6.groups[0].match == "xxx");
 // ------------------------------------------------
 
 static_assert(kaixo::regex<"a{0}">::parse("aaaa") == "");
+static_assert(kaixo::regex<"a{0}?">::parse("aaaa") == "");
+static_assert(kaixo::regex<"a{0}+">::parse("aaaa") == "");
 static_assert(kaixo::regex<"a{1}">::parse("aaaa") == "a");
+static_assert(kaixo::regex<"a{1}+">::parse("aaaa") == "a");
+static_assert(kaixo::regex<"a{1}?">::parse("aaaa") == "a");
+static_assert(kaixo::regex<"a{2}">::parse("aaaa") == "aa");
+static_assert(kaixo::regex<"a{2}+">::parse("aaaa") == "aa");
+static_assert(kaixo::regex<"a{2}?">::parse("aaaa") == "aa");
 static_assert(kaixo::regex<"\\w{0,}b">::parse("b") == "b");
 static_assert(kaixo::regex<"\\w{0,}b">::parse("abaab") == "abaab");
 static_assert(kaixo::regex<"\\w{1,}b">::parse("abaab") == "abaab");
@@ -155,6 +162,13 @@ static_assert(kaixo::regex<"\\w{2,}?b">::parse("aaabaab") == "aaab");
 static_assert(kaixo::regex<"\\w{3,}?b">::parse("aaabaab") == "aaab");
 static_assert(kaixo::regex<"\\w{4,}?b">::parse("aaabaab") == "aaabaab");
 
+static_assert(kaixo::regex<"\\d{0,}+b">::parse("1baab") == "1b");
+static_assert(kaixo::regex<"\\d{1,}+b">::parse("1baab") == "1b");
+static_assert(kaixo::regex<"\\d{1,}+b">::parse("b11b") == "11b");
+static_assert(kaixo::regex<"\\d{2,}+b">::parse("1aab11b") == "11b");
+static_assert(kaixo::regex<"\\d{3,}+b">::parse("11a111b") == "111b");
+static_assert(kaixo::regex<"\\d{4,}+b">::parse("111111b") == "111111b");
+
 static_assert(kaixo::regex<"\\w{0,2}b">::parse("b") == "b");
 static_assert(kaixo::regex<"\\w{0,4}b">::parse("abaab") == "abaab");
 static_assert(kaixo::regex<"\\w{1,4}b">::parse("abaab") == "abaab");
@@ -168,6 +182,13 @@ static_assert(kaixo::regex<"\\w{1,4}?b">::parse("baab") == "baab");
 static_assert(kaixo::regex<"\\w{2,5}?b">::parse("aaabaab") == "aaab");
 static_assert(kaixo::regex<"\\w{3,6}?b">::parse("aaabaab") == "aaab");
 static_assert(kaixo::regex<"\\w{4,4}?b">::parse("aaabaab") == "abaab");
+
+static_assert(kaixo::regex<"\\w{0,2}+b">::parse("abaab") == "aab");
+static_assert(kaixo::regex<"\\w{1,4}+b">::parse("abaab") == "abaab");
+static_assert(!kaixo::regex<"\\w{1,4}+b">::parse("baab"));
+static_assert(kaixo::regex<"\\w{2,5}+b">::parse("aaabaab") == "aabaab");
+static_assert(kaixo::regex<"\\w{3,6}+b">::parse("aaabaab") == "aaabaab");
+static_assert(kaixo::regex<"\\w{4,4}+b">::parse("aaabaab") == "abaab");
 
 static_assert(kaixo::regex<"(?:a{1,2}){1,2}">::parse("aaaaaaaa") == "aaaa");
 static_assert(kaixo::regex<"(?:a{1,2}?){1,2}?">::parse("aaaaaaaa") == "a");
@@ -190,6 +211,24 @@ static_assert(kaixo::regex<"(?'a'a(?'sub'a))">::parse("aa").groups["sub"].match 
 static_assert(kaixo::regex<"(?'a'a)(?'b'b)">::parse("ab").groups["a"].match == "a");
 static_assert(kaixo::regex<"(?'a'a)(?'b'b)">::parse("ab").groups["b"].match == "b");
 static_assert(kaixo::regex<"(?'all'(?'a'a)(?'b'b))">::parse("ab").groups["all"].match == "ab");
+
+// ------------------------------------------------
+
+static_assert(!kaixo::regex<"\\d?+.">::parse("1"));
+static_assert(!kaixo::regex<"\\d{0,1}+.">::parse("1"));
+static_assert(!kaixo::regex<"\\d*+.">::parse("11111"));
+static_assert(!kaixo::regex<"\\d{0,}+.">::parse("11111"));
+static_assert(!kaixo::regex<"\\d++.">::parse("11111"));
+static_assert(!kaixo::regex<"\\d{1,}+.">::parse("11111"));
+static_assert(kaixo::regex<"\\d?+.">::parse("a") == "a");
+static_assert(kaixo::regex<"\\d{0,1}+.">::parse("a") == "a");
+static_assert(kaixo::regex<"\\d*+.">::parse("a") == "a");
+static_assert(kaixo::regex<"\\d{0,}+.">::parse("a") == "a");
+static_assert(kaixo::regex<"\\d++.">::parse("1a") == "1a");
+static_assert(kaixo::regex<"\\d{1,}+.">::parse("1a") == "1a");
+
+static_assert(!kaixo::regex<"\\d{0,4}+.">::parse("1111"));
+static_assert(kaixo::regex<"\\d{0,}+.">::parse("1111a") == "1111a");
 
 // ------------------------------------------------
 

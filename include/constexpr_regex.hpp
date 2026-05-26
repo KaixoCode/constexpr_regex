@@ -640,7 +640,7 @@ namespace kaixo {
         @tparam Group               group index that this node captures into.
         @tparam AllowBacktracking   whether this node is allowed to backtrack.
      */
-    template<std::size_t MinRepeats = 0
+    template<std::size_t MinRepeats = std::string_view::npos
            , std::size_t MaxRepeats = std::string_view::npos
            , std::size_t Group = std::string_view::npos
            , regex_literal GroupName = ""
@@ -730,6 +730,14 @@ namespace kaixo {
          */
         template<std::size_t I>
         using with_group = nfa_graph_node<typename metadata::template with_group<I>, Operation, Outs...>;
+
+        /**
+            Set whether this node is allowed to backtrack.
+
+            @tparam Allow       whether to allow backtracking.
+         */
+        template<bool Allow>
+        using with_backtracking = nfa_graph_node<typename metadata::template with_backtracking<Allow>, Operation, Outs...>;
 
         /** 
             Append a possible next node to the list. This means it will
@@ -848,25 +856,27 @@ namespace kaixo {
 
             constexpr std::size_t min_repeats = node::metadata::min_repeats;
             constexpr std::size_t max_repeats = node::metadata::max_repeats;
+            constexpr bool is_repeating = min_repeats != std::string_view::npos;
 
             return [&]<std::size_t ...Is>(std::index_sequence<Is...>) -> result_type {
                 result_type final_result{};
 
-                if constexpr (((Is == 0) || ...)) { // If this node recurses.
+                if constexpr (is_repeating && ((Is == 0) || ...)) { // If this node recurses.
                     if (n + 1 < min_repeats) { // And we're not at minimum repeats yet.
-                        final_result = parse<Meta, I>(ctx, n + 1, ns...); // Then return recurse.
+                        final_result = parse<Meta, I>(ctx, true, n + 1, ns...); // Then return recurse.
                         return final_result;
                     }
                 }
 
                 (([&] { // Find first followup that succeeds
-                    if constexpr (Is == 0) {
+                    if constexpr (is_repeating && Is == 0) {
+                        // If it's a recurse, and we're past our max repeats, skip it.
                         if (n + 1 >= max_repeats) {
                             return false;
                         }
                     }
 
-                    auto result = parse<Meta, I + Is>(ctx, Is == 0 ? n + 1 : n, ns...);
+                    auto result = parse<Meta, I + Is>(ctx, Is == 0, Is == 0 ? n + 1 : 0, ns...);
                     if (result) final_result = result;
                     return static_cast<bool>(result);
                 }()) || ...);
@@ -885,7 +895,7 @@ namespace kaixo {
             @returns parse result.
          */
         template<class Meta, std::size_t I = 0, class ...Ns>
-        constexpr static typename Meta::result_type parse(context& ctx, std::size_t n = 0, Ns...ns) {
+        constexpr static typename Meta::result_type parse(context& ctx, bool recurse = false, std::size_t n = -1, Ns...ns) {
             constexpr std::size_t parent_index = Meta::index;
             constexpr std::size_t group = Meta::node_meta::group;
             constexpr bool allow_backtracking = Meta::node_meta::allow_backtracking;
@@ -924,7 +934,17 @@ namespace kaixo {
 
                 constexpr std::size_t min_repeats = node::metadata::min_repeats;
                 constexpr std::size_t max_repeats = node::metadata::max_repeats;
+                constexpr bool is_repeating = min_repeats != std::string_view::npos;
                 constexpr bool allow_backtracking = node::metadata::allow_backtracking;
+
+                if constexpr (is_repeating) {
+                    if (!recurse) { 
+                        // If this node recurses. And it's its first call, call it through the
+                        // followup, because it might has a min_repeats of 0, and so it might be optional.
+                        // Which is already nicely handled by parse_followup.
+                        return parse_followup<Meta, I>(ctx, -1, ns...);
+                    }
+                }
 
                 if constexpr (std::same_as<graph_start_node, operation>) {
                     auto _ = ctx.backup();
@@ -949,12 +969,12 @@ namespace kaixo {
                     // If backtracking is allowed, the followup is handled by the subgraph.
                     // Otherwise, no backtracking means the subgraph consumes as much as it can
                     // and then we try the followup here, and if it fails it fails.
-                    if constexpr (allow_backtracking) { 
-                        return operation::template parse<parse_metadata>(ctx, 0, n, ns...);
+                    if constexpr (allow_backtracking) {
+                        return operation::template parse<parse_metadata>(ctx, false, -1, n, ns...);
                     } else {
                         auto _ = ctx.backup();
 
-                        auto result = operation::template parse<parse_metadata>(ctx, 0, n, ns...);
+                        auto result = operation::template parse<parse_metadata>(ctx, false, -1, n, ns...);
                         if (!result) return _.revert();
 
                         auto followup = parse_followup<Meta, I>(ctx, n, ns...);
@@ -962,13 +982,11 @@ namespace kaixo {
 
                         return result_type::merge(result, followup);
                     }
-                } else if constexpr (max_repeats == 0) { // Max repeats == 0, means it shouldn't actually parse this node.
-                    return parse_followup<Meta, I>(ctx, n, ns...);
                 } else {
                     auto _ = ctx.backup();
 
                     auto result = operation::parse(ctx);
-                    if (!result) return _.revert();
+                    if (!result) return _.revert(); 
 
                     auto followup = parse_followup<Meta, I>(ctx, n, ns...);
                     if (!followup) return _.revert();
@@ -991,6 +1009,10 @@ namespace kaixo {
     struct lazy_many_token;
     struct lazy_some_token;
     struct lazy_optional_token;
+    struct possessive_many_token;
+    struct possessive_some_token;
+    struct possessive_optional_token;
+    struct delete_previous_token;
     struct disjunction_token;
     struct right_parenthesis_token;
     struct begin_character_class_token;
@@ -1020,28 +1042,25 @@ namespace kaixo {
     template<class A>
     using unit_token = A; // Used as unit in nested_graph_token.
 
-    template<std::size_t Min, std::size_t Max, bool Lazy>
+    template<std::size_t Min, std::size_t Max, bool Lazy, bool Possessive>
     struct match_repeat_token {
         using is_match_repeat_token_specifier = int;
         constexpr static std::size_t min = Min;
         constexpr static std::size_t max = Max;
         constexpr static bool lazy = Lazy;
+        constexpr static bool possessive = Possessive;
     };
 
-    template<class Ty> // {N,M}, where N != 0
-    concept match_repeat_some_token = !Ty::lazy && Ty::min > 0 &&
+    template<class Ty> // {N,M},
+    concept is_match_repeat_token = !Ty::lazy && !Ty::possessive &&
         requires() { typename Ty::is_match_repeat_token_specifier; };
 
-    template<class Ty> // {0,M},
-    concept match_repeat_many_token = !Ty::lazy && Ty::min == 0 &&
+    template<class Ty> // {N,M}?
+    concept is_lazy_match_repeat_token = Ty::lazy && !Ty::possessive &&
         requires() { typename Ty::is_match_repeat_token_specifier; };
 
-    template<class Ty> // {N,M}?, where N != 0
-    concept lazy_match_repeat_some_token = Ty::lazy && Ty::min > 0 &&
-        requires() { typename Ty::is_match_repeat_token_specifier; };
-
-    template<class Ty> // {0,M}?,
-    concept lazy_match_repeat_many_token = Ty::lazy && Ty::min == 0 &&
+    template<class Ty> // {N,M}+
+    concept is_possessive_match_repeat_token = !Ty::lazy && Ty::possessive &&
         requires() { typename Ty::is_match_repeat_token_specifier; };
 
     // ------------------------------------------------
@@ -1084,6 +1103,23 @@ namespace kaixo {
               max == std::string_view::npos ? max 
             : Token::max == std::string_view::npos ? Token::max
             : max + Token::max,
+            group_counter
+        >;
+        
+        /**
+            Add a token. Accumulates onto min and max using the min
+            and max size of the token.
+
+            @tparam Token       The metadata of the token added to node list.
+         */
+        template<class Token>
+        using remove_token = regex_parser_metadata<
+              min == std::string_view::npos ? min 
+            : Token::min == std::string_view::npos ? Token::min
+            : min - Token::min,
+              max == std::string_view::npos ? max 
+            : Token::max == std::string_view::npos ? Token::max
+            : max - Token::max,
             group_counter
         >;
         
@@ -1343,6 +1379,27 @@ namespace kaixo {
         using remainder = typename parser::remainder;
     };
 
+    // Case for '*+', possessive zero-or-more; no backtracking
+    template<class MetaData, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<possessive_many_token, Tokens...>, token_stream<A, Nodes...>> {
+        using new_metadata = typename MetaData
+            ::template apply_many<typename A::operation::metadata>;
+
+        using parser = regex_parser<
+            new_metadata
+          , token_stream<Tokens...>
+          , token_stream<nfa_graph_node<typename nfa_graph_node_metadata<>::template with_backtracking<false>
+                                      , nfa_graph<new_metadata
+                                                , typename A::template prepend_connection<0>
+                                                            ::template append_connection<1>
+                                                            ::template with_min_repeat<0>>>
+                       , Nodes...>
+        >;
+
+        using type = typename parser::type;
+        using remainder = typename parser::remainder;
+    };
+
     // Case for '+', make the previous node we parsed recursive.
     template<class MetaData, class ...Tokens, class Top, class ...Nodes>
     struct regex_parser<MetaData, token_stream<some_token, Tokens...>, token_stream<Top, Nodes...>> {
@@ -1372,6 +1429,27 @@ namespace kaixo {
           , token_stream<Tokens...>
           , token_stream<typename Top::template append_connection<1>
                                      ::template append_connection<0> // Make the node recurse, but prefer the non-recursive path
+                       , Nodes...>
+        >;
+
+        using type = typename parser::type;
+        using remainder = typename parser::remainder;
+    };
+
+    // Case for '++', possessive one-or-more; no backtracking.
+    template<class MetaData, class ...Tokens, class Top, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<possessive_some_token, Tokens...>, token_stream<Top, Nodes...>> {
+        using new_metadata = typename MetaData
+            ::template apply_some<typename Top::operation::metadata>;
+
+        using parser = regex_parser<
+            new_metadata
+          , token_stream<Tokens...>
+          , token_stream<nfa_graph_node<typename nfa_graph_node_metadata<>::template with_backtracking<false>
+                                      , nfa_graph<new_metadata
+                                                , typename Top::template prepend_connection<0>
+                                                              ::template append_connection<1>
+                                                              ::template with_min_repeat<1>>>
                        , Nodes...>
         >;
 
@@ -1411,6 +1489,28 @@ namespace kaixo {
           , token_stream<Tokens...>
           , token_stream<B
                        , typename A::template prepend_connection<2> // Make the next node optional, and prefer no match
+                       , Nodes...>
+        >;
+
+        using type = typename parser::type;
+        using remainder = typename parser::remainder;
+    };
+
+    // Case for '?+', possessive optional; no backtracking
+    template<class MetaData, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<possessive_optional_token, Tokens...>, token_stream<A, Nodes...>> {
+        using new_metadata = typename MetaData
+            ::template apply_optional<typename A::operation::metadata>;
+
+        using parser = regex_parser<
+            new_metadata
+          , token_stream<Tokens...>
+          , token_stream<nfa_graph_node<typename nfa_graph_node_metadata<>::template with_backtracking<false>
+                                      , nfa_graph<new_metadata
+                                                , typename A::template prepend_connection<0>
+                                                            ::template append_connection<1>
+                                                            ::template with_min_repeat<0>
+                                                            ::template with_max_repeat<1>>>
                        , Nodes...>
         >;
 
@@ -1597,8 +1697,24 @@ namespace kaixo {
         using remainder = typename parser::remainder;
     };
 
-    // Match range case: '{N,M}', where N != 0.
-    template<class MetaData, match_repeat_some_token N, class ...Tokens, class A, class ...Nodes>
+    // Match range case: '{0,0}'
+    template<class MetaData, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<delete_previous_token, Tokens...>, token_stream<A, Nodes...>> {
+        using new_metadata = typename MetaData
+            ::template remove_token<typename A::operation::metadata>;
+
+        using parser = regex_parser<
+            new_metadata
+          , token_stream<Tokens...>
+          , token_stream<Nodes...>
+        >;
+
+        using type = typename parser::type;
+        using remainder = typename parser::remainder;
+    };
+
+    // Match range case: '{N,M}'
+    template<class MetaData, is_match_repeat_token N, class ...Tokens, class A, class ...Nodes>
     struct regex_parser<MetaData, token_stream<N, Tokens...>, token_stream<A, Nodes...>> {
         using new_metadata = typename MetaData
             ::template apply_repeat<typename A::operation::metadata, N::min>;
@@ -1617,28 +1733,8 @@ namespace kaixo {
         using remainder = typename parser::remainder;
     };
 
-    // Match range case: '{0,M}'.
-    template<class MetaData, match_repeat_many_token N, class ...Tokens, class B, class A, class ...Nodes>
-    struct regex_parser<MetaData, token_stream<N, Tokens...>, token_stream<B, A, Nodes...>> {
-        using new_metadata = typename MetaData
-            ::template apply_repeat<typename B::operation::metadata, N::min>;
-
-        using parser = regex_parser<
-            new_metadata
-          , token_stream<Tokens...>
-          , token_stream<typename B::template append_connection<1>
-                                   ::template prepend_connection<0> // Make recursive, and prefer that path
-                                   ::template with_max_repeat<N::max>
-                       , typename A::template append_connection<2> // Make next node optional
-                       , Nodes...>
-        >;
-
-        using type = typename parser::type;
-        using remainder = typename parser::remainder;
-    };
-
-    // Match range case: '{N,M}?', where N != 0.
-    template<class MetaData, lazy_match_repeat_some_token N, class ...Tokens, class A, class ...Nodes>
+    // Match range case: '{N,M}?'
+    template<class MetaData, is_lazy_match_repeat_token N, class ...Tokens, class A, class ...Nodes>
     struct regex_parser<MetaData, token_stream<N, Tokens...>, token_stream<A, Nodes...>> {
         using new_metadata = typename MetaData
             ::template apply_repeat<typename A::operation::metadata, N::min>;
@@ -1657,19 +1753,21 @@ namespace kaixo {
         using remainder = typename parser::remainder;
     };
 
-    // Match range case: '{0,M}?'.
-    template<class MetaData, lazy_match_repeat_many_token N, class ...Tokens, class B, class A, class ...Nodes>
-    struct regex_parser<MetaData, token_stream<N, Tokens...>, token_stream<B, A, Nodes...>> {
+    // Match range case: '{N,M}+'
+    template<class MetaData, is_possessive_match_repeat_token N, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<N, Tokens...>, token_stream<A, Nodes...>> {
         using new_metadata = typename MetaData
-            ::template apply_repeat<typename B::operation::metadata, N::min>;
+            ::template apply_repeat<typename A::operation::metadata, N::min>;
 
         using parser = regex_parser<
             new_metadata
           , token_stream<Tokens...>
-          , token_stream<typename B::template append_connection<1>
-                                   ::template append_connection<0> // Make recursive
-                                   ::template with_max_repeat<N::max>
-                       , typename A::template prepend_connection<2> // Make next node optional
+          , token_stream<nfa_graph_node<typename nfa_graph_node_metadata<>::template with_backtracking<false>
+                                      , nfa_graph<new_metadata
+                                                , typename A::template prepend_connection<0>
+                                                            ::template append_connection<1>
+                                                            ::template with_min_repeat<N::min>
+                                                            ::template with_max_repeat<N::max>>>
                        , Nodes...>
         >;
 
@@ -1736,7 +1834,19 @@ namespace kaixo {
 
         if constexpr (A[number1.characters_parsed] == ',') {
             if constexpr (A[number1.characters_parsed + 1] == '}') {
-                if constexpr (A[number1.characters_parsed + 2] == '?') {
+                if constexpr (A[number1.characters_parsed + 2] == '+') {
+                    if constexpr (number1.result == 0) {
+                        // case: {0,}+
+                        return regex_tokenizer<A += (number1.characters_parsed + 3), 0, Tokens..., possessive_many_token>();
+                    } else if constexpr (number1.result == 1) {
+                        // case: {1,}+
+                        return regex_tokenizer<A += (number1.characters_parsed + 3), 0, Tokens..., possessive_some_token>();
+                    } else {
+                        // case: {N,}+
+                        return regex_tokenizer<A += (number1.characters_parsed + 3), 0, Tokens...,
+                            match_repeat_token<number1.result, std::string_view::npos, false, true>>();
+                    }
+                } else if constexpr (A[number1.characters_parsed + 2] == '?') {
                     if constexpr (number1.result == 0) {
                         // case: {0,}?
                         return regex_tokenizer<A += (number1.characters_parsed + 3), 0, Tokens..., lazy_many_token>();
@@ -1746,7 +1856,7 @@ namespace kaixo {
                     } else {
                         // case: {N,}?
                         return regex_tokenizer<A += (number1.characters_parsed + 3), 0, Tokens...,
-                            match_repeat_token<number1.result, std::string_view::npos, true>>();
+                            match_repeat_token<number1.result, std::string_view::npos, true, false>>();
                     }
                 } else { 
                     if constexpr (number1.result == 0) {
@@ -1758,7 +1868,7 @@ namespace kaixo {
                     } else {
                         // case: {N,}
                         return regex_tokenizer<A += (number1.characters_parsed + 2), 0, Tokens...,
-                            match_repeat_token<number1.result, std::string_view::npos, false>>();
+                            match_repeat_token<number1.result, std::string_view::npos, false, false>>();
                     }
                 }
             } else {
@@ -1767,37 +1877,74 @@ namespace kaixo {
                 static_assert(A[number1.characters_parsed + number2.characters_parsed + 1] == '}', "Missing closing '}' in repeat.");
                 static_assert(number1.result <= number2.result, "The first number must be smaller or equal to the second number in a repeat.");
 
-                if constexpr (A[number1.characters_parsed + number2.characters_parsed + 2] == '?') {
-                    if constexpr (number1.result == 0 && number2.result == 1) {
+                if constexpr (A[number1.characters_parsed + number2.characters_parsed + 2] == '+') {
+                    if constexpr (number2.result == 0) {
+                        // case: {0,0}+, parse 0 times, so just delete the previous.
+                        return regex_tokenizer<A += (number1.characters_parsed + number2.characters_parsed + 3), 0, Tokens..., delete_previous_token>();
+                    } else if constexpr (number1.result == 0 && number2.result == 1) {
+                        // case: {0,1}+, equivalent to '?+'
+                        return regex_tokenizer<A += (number1.characters_parsed + number2.characters_parsed + 3), 0, Tokens..., possessive_optional_token>();
+                    } else {
+                        // case: {N,M}+
+                        return regex_tokenizer<A += (number1.characters_parsed + number2.characters_parsed + 3), 0, Tokens..., 
+                            match_repeat_token<number1.result, number2.result, false, true>>();
+                    } 
+                } else if constexpr (A[number1.characters_parsed + number2.characters_parsed + 2] == '?') {
+                    if constexpr (number2.result == 0) {
+                        // case: {0,0}?, parse 0 times, so just delete the previous.
+                        return regex_tokenizer<A += (number1.characters_parsed + number2.characters_parsed + 3), 0, Tokens..., delete_previous_token>();
+                    } else if constexpr (number1.result == 0 && number2.result == 1) {
                         // case: {0,1}?, equivalent to '??'
                         return regex_tokenizer<A += (number1.characters_parsed + number2.characters_parsed + 3), 0, Tokens..., lazy_optional_token>();
                     } else {
                         // case: {N,M}?
                         return regex_tokenizer<A += (number1.characters_parsed + number2.characters_parsed + 3), 0, Tokens..., 
-                            match_repeat_token<number1.result, number2.result, true>>();
+                            match_repeat_token<number1.result, number2.result, true, false>>();
                     }
                 } else { 
-                    if constexpr (number1.result == 0 && number2.result == 1) {
+                    if constexpr (number2.result == 0) {
+                        // case: {0,0}, parse 0 times, so just delete the previous
+                        return regex_tokenizer<A += (number1.characters_parsed + number2.characters_parsed + 2), 0, Tokens..., delete_previous_token>();
+                    } else if constexpr (number1.result == 0 && number2.result == 1) {
                         // case: {0,1}, equivalent to '?'
                         return regex_tokenizer<A += (number1.characters_parsed + number2.characters_parsed + 2), 0, Tokens..., optional_token>();
                     } else {
                         // case: {N,M}
                         return regex_tokenizer<A += (number1.characters_parsed + number2.characters_parsed + 2), 0, Tokens...,
-                            match_repeat_token<number1.result, number2.result, false>>();
+                            match_repeat_token<number1.result, number2.result, false, false>>();
                     }
                 }
             }
         } else {
             static_assert(A[number1.characters_parsed] == '}', "Missing closing '}' in repeat.");
 
-            if constexpr (A[number1.characters_parsed + 1] == '?') { 
-                // case: {N}?
-                return regex_tokenizer<A += (number1.characters_parsed + 2), 0, Tokens..., 
-                    match_repeat_token<number1.result, number1.result, true>>();
+            if constexpr (A[number1.characters_parsed + 1] == '+') {
+                if constexpr (number1.result == 0) {
+                    // case: {0}+
+                    return regex_tokenizer<A += (number1.characters_parsed + 2), 0, Tokens..., delete_previous_token>();
+                } else {
+                    // case: {N}+
+                    return regex_tokenizer<A += (number1.characters_parsed + 2), 0, Tokens..., 
+                        match_repeat_token<number1.result, number1.result, false, true>>();
+                }
+            } else if constexpr (A[number1.characters_parsed + 1] == '?') {
+                if constexpr (number1.result == 0) {
+                    // case: {0}?
+                    return regex_tokenizer<A += (number1.characters_parsed + 2), 0, Tokens..., delete_previous_token>();
+                } else {
+                    // case: {N}?
+                    return regex_tokenizer<A += (number1.characters_parsed + 2), 0, Tokens..., 
+                        match_repeat_token<number1.result, number1.result, true, false>>();
+                }
             } else { 
-                // case: {N}
-                return regex_tokenizer<A += (number1.characters_parsed + 1), 0, Tokens...,
-                    match_repeat_token<number1.result, number1.result, false>>();
+                if constexpr (number1.result == 0) {
+                    // case: {0}
+                    return regex_tokenizer<A += (number1.characters_parsed + 1), 0, Tokens..., delete_previous_token>();
+                } else {
+                    // case: {N}
+                    return regex_tokenizer<A += (number1.characters_parsed + 1), 0, Tokens...,
+                        match_repeat_token<number1.result, number1.result, false, false>>();
+                }
             }
         }
     }
@@ -1829,17 +1976,17 @@ namespace kaixo {
         }
         else if constexpr (!InsideClass && A[0] == '*') {
             if constexpr (A[1] == '?') return regex_tokenizer<A += 2, 0, Tokens..., lazy_many_token>();
-            else if constexpr (A[1] == '+') static_assert(A[1] != '+', "Possessive quantifiers not supported!");
+            else if constexpr (A[1] == '+') return regex_tokenizer<A += 2, 0, Tokens..., possessive_many_token>();
             else return regex_tokenizer<A += 1, 0, Tokens..., many_token>();
         }
         else if constexpr (!InsideClass && A[0] == '+') {
             if constexpr (A[1] == '?') return regex_tokenizer<A += 2, 0, Tokens..., lazy_some_token>();
-            else if constexpr (A[1] == '+') static_assert(A[1] != '+', "Possessive quantifiers not supported!");
+            else if constexpr (A[1] == '+') return regex_tokenizer<A += 2, 0, Tokens..., possessive_some_token>();
             else return regex_tokenizer<A += 1, 0, Tokens..., some_token>();
         }
         else if constexpr (!InsideClass && A[0] == '?') {
             if constexpr (A[1] == '?') return regex_tokenizer<A += 2, 0, Tokens..., lazy_optional_token>();
-            else if constexpr (A[1] == '+') static_assert(A[1] != '+', "Possessive quantifiers not supported!");
+            else if constexpr (A[1] == '+') return regex_tokenizer<A += 2, 0, Tokens..., possessive_optional_token>();
             else return regex_tokenizer<A += 1, 0, Tokens..., optional_token>();
         }
         else if constexpr (!InsideClass && A[0] == '.') return regex_tokenizer<A += 1, 0, Tokens..., wildcard_character_parser>();
