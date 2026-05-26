@@ -169,6 +169,9 @@ static_assert(kaixo::regex<"\\w{2,5}?b">::parse("aaabaab") == "aaab");
 static_assert(kaixo::regex<"\\w{3,6}?b">::parse("aaabaab") == "aaab");
 static_assert(kaixo::regex<"\\w{4,4}?b">::parse("aaabaab") == "abaab");
 
+static_assert(kaixo::regex<"(?:a{1,2}){1,2}">::parse("aaaaaaaa") == "aaaa");
+static_assert(kaixo::regex<"(?:a{1,2}?){1,2}?">::parse("aaaaaaaa") == "a");
+
 // ------------------------------------------------
 
 int main() {
