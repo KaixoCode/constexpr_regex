@@ -1657,7 +1657,6 @@ namespace kaixo {
     /** Consume a comment from a regex string literal.
     
         @tparam A           the regex string literal to parse from.
-        @tparam I           character counter, used in recursion.
 
         @returns number of characters parsed
      */
