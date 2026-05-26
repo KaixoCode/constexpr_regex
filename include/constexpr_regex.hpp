@@ -240,6 +240,19 @@ namespace kaixo {
             return result;
         }
 
+        /** Tries to consume a single character, unless it's a specific character.
+            
+            @param c            blacklisted character.
+
+            @returns a single parsed character if success, otherwise nullopt.
+         */
+        constexpr parse_result<> consume_not(char c) {
+            if (value.empty() || value.front() == c) return std::nullopt;
+            std::string_view result = value.substr(0, 1);
+            value = value.substr(1);
+            return result;
+        }
+
         /** Tries to consume one character.
 
             @param c            character.
@@ -392,7 +405,7 @@ namespace kaixo {
             return ctx.consume(C);
         }
     };
-
+    
     /**
         Parses a single character that matches the meta character; 
         "\\w" parses a word character, "\\d" parses a digit etc.
@@ -414,6 +427,10 @@ namespace kaixo {
             else if constexpr (C == 'C') static_assert(C != C, "Data unit not supported"); // TODO: Data unit
             else if constexpr (C == 'R') static_assert(C != C, "Unicode newlines not supported"); // TODO: Unicode newline
             else if constexpr (C == 'N') return ctx.consume_one_not_of("\n"); // Unicode newline
+            else if constexpr (C == 'h') return ctx.consume_one_of(" \t"); // Horizontal whitespace
+            else if constexpr (C == 'H') return ctx.consume_one_not_of(" \t"); // Horizontal whitespace
+            else if constexpr (C == 'v') return ctx.consume_one_of("\n\r\f\v"); // Vertical whitespace
+            else if constexpr (C == 'V') return ctx.consume_one_not_of("\n\r\f\v"); // Vertical whitespace
         }
     };
 
@@ -446,7 +463,10 @@ namespace kaixo {
             if constexpr (C == 'b') return ctx.word_boundary(); 
             else if constexpr (C == 'B') return ctx.non_word_boundary();
             else if constexpr (C == '^') return ctx.beginning_boundary();
+            else if constexpr (C == 'A') return ctx.beginning_boundary();
             else if constexpr (C == '$') return ctx.end_boundary();
+            else if constexpr (C == 'Z') return ctx.end_boundary(); // TODO: multiline mode etc.
+            else if constexpr (C == 'z') return ctx.end_boundary();
         }
     };
 
@@ -1655,14 +1675,17 @@ namespace kaixo {
         }
         else if constexpr (!InsideClass && A[0] == '*') {
             if constexpr (A[1] == '?') return regex_tokenizer<A += 2, 0, Tokens..., lazy_many_token>();
+            else if constexpr (A[1] == '+') static_assert(A[1] != '+', "Possessive quantifiers not supported!");
             else return regex_tokenizer<A += 1, 0, Tokens..., many_token>();
         }
         else if constexpr (!InsideClass && A[0] == '+') {
             if constexpr (A[1] == '?') return regex_tokenizer<A += 2, 0, Tokens..., lazy_some_token>();
+            else if constexpr (A[1] == '+') static_assert(A[1] != '+', "Possessive quantifiers not supported!");
             else return regex_tokenizer<A += 1, 0, Tokens..., some_token>();
         }
         else if constexpr (!InsideClass && A[0] == '?') {
             if constexpr (A[1] == '?') return regex_tokenizer<A += 2, 0, Tokens..., lazy_optional_token>();
+            else if constexpr (A[1] == '+') static_assert(A[1] != '+', "Possessive quantifiers not supported!");
             else return regex_tokenizer<A += 1, 0, Tokens..., optional_token>();
         }
         else if constexpr (!InsideClass && A[0] == '.') return regex_tokenizer<A += 1, 0, Tokens..., wildcard_character_parser>();
@@ -1677,37 +1700,80 @@ namespace kaixo {
         else if constexpr (C > 1 && A[0] == ']') return regex_tokenizer<A += 1, 0, Tokens..., end_character_class_token>();
         else if constexpr (!InsideClass && A[0] == '(') {
             if constexpr (A[1] == '?') {
-                    if constexpr (A[2] == ':') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<unit_token>>();
-                    else if constexpr (A[2] == '=') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<lookahead_assertion>>();
-                    else if constexpr (A[2] == '!') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<negative_lookahead_assertion>>();
-                    else if constexpr (A[2] == '<' && A[3] == '=') return regex_tokenizer<A += 4, 0, Tokens..., nested_graph_token<lookbehind_assertion>>();
-                    else if constexpr (A[2] == '<' && A[3] == '!') return regex_tokenizer<A += 4, 0, Tokens..., nested_graph_token<negative_lookbehind_assertion>>();
+                if constexpr (A[2] == ':') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<unit_token>>();
+                else if constexpr (A[2] == '>') static_assert(A[1] != '>', "Atomic groups not supported!");
+                else if constexpr (A[2] == '|') static_assert(A[1] != '|', "Duplicate/reset subpattern group number group not supported!");
+                else if constexpr (A[2] == '#') static_assert(A[1] != '#', "Comment group not supported!");
+                else if constexpr (A[2] == '=') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<lookahead_assertion>>();
+                else if constexpr (A[2] == '!') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<negative_lookahead_assertion>>();
+                else if constexpr (A[2] == '<' && A[3] == '=') return regex_tokenizer<A += 4, 0, Tokens..., nested_graph_token<lookbehind_assertion>>();
+                else if constexpr (A[2] == '<' && A[3] == '!') return regex_tokenizer<A += 4, 0, Tokens..., nested_graph_token<negative_lookbehind_assertion>>();
+                else static_assert(A[1] != '?', "Unsupported group type!");
+                // TODO: potentially add named groups.
             } else {
                 return regex_tokenizer<A += 1, 0, Tokens..., capture_group_token>();
             }
-        } else if constexpr (A[0] == '\\') {
-            if constexpr (A[1] == 'b') {
+        }
+        else if constexpr (A[0] == '\\') {
+            if constexpr (A[1] == 'a') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\a'>>();
+            else if constexpr (A[1] == 'A') return regex_tokenizer<A += 2, Next, Tokens..., boundary_assertion<'A'>>();
+            else if constexpr (A[1] == 'b') {
                 if constexpr (InsideClass) regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\b'>>();
                 else return regex_tokenizer<A += 2, 0, Tokens..., boundary_assertion<'b'>>();
             }
-            else if constexpr (A[1] == 'B') return regex_tokenizer<A += 2, Next, Tokens..., boundary_assertion<'B'>>();
-            else if constexpr (A[1] == 's') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'s'>>();
-            else if constexpr (A[1] == 'S') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'S'>>();
+            else if constexpr (A[1] == 'B') {
+                static_assert(!InsideClass, "\\B may not be used inside a character class!");
+                return regex_tokenizer<A += 2, Next, Tokens..., boundary_assertion<'B'>>();
+            }
+            else if constexpr (A[1] == 'c') static_assert(A[1] != 'c', "Control characters not supported!");
+            else if constexpr (A[1] == 'C') {
+                static_assert(!InsideClass, "\\C may not be used inside a character class!");
+                return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'C'>>();
+            }
             else if constexpr (A[1] == 'd') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'d'>>();
             else if constexpr (A[1] == 'D') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'D'>>();
+            else if constexpr (A[1] == 'f') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\f'>>();
+            else if constexpr (A[1] == 'g') static_assert(A[1] != 'g', "Subpattern match not supported!");
+            else if constexpr (A[1] == 'G') static_assert(A[1] != 'G', "Start of match not supported!");
+            else if constexpr (A[1] == 'h') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'h'>>();
+            else if constexpr (A[1] == 'H') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'H'>>();
+            else if constexpr (A[1] == 'k') static_assert(A[1] != 'k', "Subpattern match not supported!");
+            else if constexpr (A[1] == 'K') static_assert(A[1] != 'K', "Reset Match not supported!");
+            else if constexpr (A[1] == 'n') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\n'>>();
+            else if constexpr (A[1] == 'N') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'N'>>();
+            else if constexpr (A[1] == 'p') static_assert(A[1] != 'p', "Unicode property not supported!");
+            else if constexpr (A[1] == 'P') static_assert(A[1] != 'P', "Unicode property not supported!");
+            else if constexpr (A[1] == 'Q') static_assert(A[1] != 'Q', "Quotes not supported!");
+            else if constexpr (A[1] == 'r') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\r'>>();
+            else if constexpr (A[1] == 'R') {
+                static_assert(!InsideClass, "\\R may not be used inside a character class!");
+                return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'R'>>();
+            }
+            else if constexpr (A[1] == 's') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'s'>>();
+            else if constexpr (A[1] == 'S') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'S'>>();
+            else if constexpr (A[1] == 't') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\t'>>();
+            else if constexpr (A[1] == 'v') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'v'>>();
+            else if constexpr (A[1] == 'V') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'V'>>();
             else if constexpr (A[1] == 'w') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'w'>>();
             else if constexpr (A[1] == 'W') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'W'>>();
-            else if constexpr (A[1] == 'X') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'X'>>();
-            else if constexpr (A[1] == 'C') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'C'>>();
-            else if constexpr (A[1] == 'R') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'R'>>();
-            else if constexpr (A[1] == 'N') return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'N'>>();
-            else if constexpr (A[1] == 'n') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\n'>>();
-            else if constexpr (A[1] == 't') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\t'>>();
+            else if constexpr (A[1] == 'x') static_assert(A[1] != 'x', "Hex characters not supported!");
+            else if constexpr (A[1] == 'X') {
+                static_assert(!InsideClass, "\\X may not be used inside a character class!");
+                return regex_tokenizer<A += 2, Next, Tokens..., meta_character_parser<'X'>>();
+            }
+            else if constexpr (A[1] == 'z') {
+                static_assert(!InsideClass, "\\z may not be used inside a character class!");
+                return regex_tokenizer<A += 2, Next, Tokens..., boundary_assertion<'z'>>();
+            }
+            else if constexpr (A[1] == 'Z') {
+                static_assert(!InsideClass, "\\Z may not be used inside a character class!");
+                return regex_tokenizer<A += 2, Next, Tokens..., boundary_assertion<'Z'>>();
+            }
             else if constexpr (A[1] == '0') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\0'>>();
-            else if constexpr (A[1] == 'r') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\r'>>();
-            else if constexpr (A[1] == 'f') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\f'>>();
-            else if constexpr (A[1] == 'a') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\a'>>();
-            else if constexpr (A[1] == 'v') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\v'>>();
+            else if constexpr (A[1] == '#') {
+                if constexpr (InsideClass) return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'#'>>();
+                else static_assert(A[1] != '#', "Subpattern match not supported!");
+            }
             else if constexpr (A[1] == '.') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'.'>>();
             else if constexpr (A[1] == '^') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'^'>>();
             else if constexpr (A[1] == '$') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'$'>>();
@@ -1722,6 +1788,7 @@ namespace kaixo {
             else if constexpr (A[1] == '}') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'}'>>();
             else if constexpr (A[1] == '\\') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'\\'>>();
             else if constexpr (A[1] == '|') return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<'|'>>();
+            else return regex_tokenizer<A += 2, Next, Tokens..., single_character_parser<A[1]>>();
         } else {
             return regex_tokenizer<A += 1, Next, Tokens..., single_character_parser<A[0]>>();
         }
