@@ -181,6 +181,18 @@ static_assert(kaixo::regex<"(?#parse the character 'a')a">::parse("a") == "a");
 
 // ------------------------------------------------
 
+static_assert(kaixo::regex<"(?'a'a)">::parse("a").groups["a"].match == "a");
+static_assert(kaixo::regex<"(?'a'a)|(?'b'b)">::parse("b").groups["b"].match == "b");
+static_assert(kaixo::regex<"(?<a>a)">::parse("a").groups["a"].match == "a");
+static_assert(kaixo::regex<"(?<a>a)|(?<b>b)">::parse("b").groups["b"].match == "b");
+static_assert(kaixo::regex<"(?'a'a(?'sub'a))">::parse("aa").groups["a"].match == "aa");
+static_assert(kaixo::regex<"(?'a'a(?'sub'a))">::parse("aa").groups["sub"].match == "a");
+static_assert(kaixo::regex<"(?'a'a)(?'b'b)">::parse("ab").groups["a"].match == "a");
+static_assert(kaixo::regex<"(?'a'a)(?'b'b)">::parse("ab").groups["b"].match == "b");
+static_assert(kaixo::regex<"(?'all'(?'a'a)(?'b'b))">::parse("ab").groups["all"].match == "ab");
+
+// ------------------------------------------------
+
 int main() {
     using email_regex = kaixo::regex<"\\b([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}\\b)">;
 

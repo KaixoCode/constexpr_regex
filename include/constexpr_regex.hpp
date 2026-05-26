@@ -27,16 +27,20 @@ namespace kaixo {
      */
     template<std::size_t N>
     struct regex_literal {
-        consteval regex_literal(const char(&data)[N], std::size_t offset = 0) 
-            : offset(offset) { std::copy_n(data, N, value); }
+        consteval regex_literal(const char(&data)[N], std::size_t offset = 0, std::size_t end = N)
+            : offset(offset), end(end) { std::copy_n(data, N, value); }
 
         consteval char operator[](std::size_t n) const { return value[offset + n]; }
-        consteval regex_literal operator+=(std::size_t n) const { return { value, offset + n }; }
-        consteval bool empty() const { return std::string_view{ value + offset, N - offset - 1 }.empty(); }
-        consteval std::size_t size() const { return std::string_view{ value + offset, N - offset - 1 }.size(); }
-        consteval std::string_view view() const { return std::string_view{ value + offset, N - offset - 1 }; }
+        consteval regex_literal operator+=(std::size_t n) const { return substr(n); }
+        consteval regex_literal substr(std::size_t n) const { return { value, offset + n, end }; }
+        consteval regex_literal substr(std::size_t n, std::size_t m) const { return { value, offset + n, offset + n + m + 1 }; }
+        consteval bool empty() const { return view().empty(); }
+        consteval std::size_t size() const { return view().size(); }
+        consteval std::string_view view() const { return std::string_view{ value + offset, end - offset - 1 }; }
+        consteval operator std::string_view() const { return view(); }
 
         std::size_t offset = 0; // Start offset in the literal. Used during tokenizing.
+        std::size_t end = N;
         char value[N]{};
     };
 
@@ -46,7 +50,35 @@ namespace kaixo {
         Capture group.
      */
     struct group {
+        std::string_view name;
         std::optional<std::string_view> match;
+    };
+
+    template<std::size_t N>
+    struct group_array : std::array<group, N> {
+
+        // ------------------------------------------------
+
+        using std::array<group, N>::operator[];
+
+        // ------------------------------------------------
+
+        constexpr bool contains(std::string_view name) const {
+            for (auto& val : *this) {
+                if (val.name == name) return true;
+            }
+            return false;
+        }
+
+        template<std::equality_comparable_with<std::string_view> Ty>
+        constexpr const group& operator[](Ty&& name) const {
+            for (auto& val : *this) {
+                if (val.name == name) return val;
+            }
+        }
+
+        // ------------------------------------------------
+
     };
 
     /**
@@ -137,7 +169,7 @@ namespace kaixo {
         // ------------------------------------------------
 
         std::optional<std::string_view> match{};
-        std::array<group, N> groups{};
+        group_array<N> groups{};
 
         // ------------------------------------------------
 
@@ -611,12 +643,14 @@ namespace kaixo {
     template<std::size_t MinRepeats = 0
            , std::size_t MaxRepeats = std::string_view::npos
            , std::size_t Group = std::string_view::npos
+           , regex_literal GroupName = ""
            , bool AllowBacktracking = true>
     struct nfa_graph_node_metadata {
         constexpr static std::size_t min_repeats = MinRepeats;
         constexpr static std::size_t max_repeats = MaxRepeats;
         constexpr static std::size_t group = Group;
         constexpr static bool allow_backtracking = AllowBacktracking;
+        constexpr static regex_literal group_name = GroupName;
 
         /**
             Update the maximum number of repeats.
@@ -624,7 +658,7 @@ namespace kaixo {
             @tparam N       new maximum number of repeats.
          */
         template<std::size_t N>
-        using with_max_repeat = nfa_graph_node_metadata<MinRepeats, N, Group, AllowBacktracking>;
+        using with_max_repeat = nfa_graph_node_metadata<MinRepeats, N, Group, GroupName, AllowBacktracking>;
 
         /**
             Update the minimum number of repeats.
@@ -632,7 +666,7 @@ namespace kaixo {
             @tparam N       new minimum number of repeats.
          */
         template<std::size_t N>
-        using with_min_repeat = nfa_graph_node_metadata<N, MaxRepeats, Group, AllowBacktracking>;
+        using with_min_repeat = nfa_graph_node_metadata<N, MaxRepeats, Group, GroupName, AllowBacktracking>;
 
         /**
             Set the groups index.
@@ -640,7 +674,15 @@ namespace kaixo {
             @tparam I           group index.
          */
         template<std::size_t I>
-        using with_group = nfa_graph_node_metadata<MinRepeats, MaxRepeats, I, AllowBacktracking>;
+        using with_group = nfa_graph_node_metadata<MinRepeats, MaxRepeats, I, GroupName, AllowBacktracking>;
+
+        /**
+            Set the groups name.
+
+            @tparam Name        group name.
+         */
+        template<regex_literal Name>
+        using with_group_name = nfa_graph_node_metadata<MinRepeats, MaxRepeats, Group, Name, AllowBacktracking>;
 
         /**
             Set whether this node is allowed to backtrack.
@@ -648,7 +690,7 @@ namespace kaixo {
             @tparam Allow       whether to allow backtracking.
          */
         template<bool Allow>
-        using with_backtracking = nfa_graph_node_metadata<MinRepeats, MaxRepeats, Group, Allow>;
+        using with_backtracking = nfa_graph_node_metadata<MinRepeats, MaxRepeats, Group, GroupName, Allow>;
     };
 
     /**
@@ -740,8 +782,6 @@ namespace kaixo {
            , class ParentMeta = void>
     struct graph_parse_metadata {
         constexpr static std::size_t index = I;
-        constexpr static std::size_t group = NodeMeta::group;
-        constexpr static std::size_t allow_backtracking = NodeMeta::allow_backtracking;
         using result_type = ResultType;
         using parent = ParentGraph;
         using node_meta = NodeMeta;
@@ -847,8 +887,8 @@ namespace kaixo {
         template<class Meta, std::size_t I = 0, class ...Ns>
         constexpr static typename Meta::result_type parse(context& ctx, std::size_t n = 0, Ns...ns) {
             constexpr std::size_t parent_index = Meta::index;
-            constexpr std::size_t group = Meta::group;
-            constexpr bool allow_backtracking = Meta::allow_backtracking;
+            constexpr std::size_t group = Meta::node_meta::group;
+            constexpr bool allow_backtracking = Meta::node_meta::allow_backtracking;
             using parent = typename Meta::parent;
             using parent_meta = typename Meta::parent_meta;
             using result_type = typename Meta::result_type;
@@ -873,6 +913,8 @@ namespace kaixo {
                     if (!result.groups[group].match) {
                         result.groups[group].match = end_of_capture_boundary;
                     }
+
+                    result.groups[group].name = Meta::node_meta::group_name;
                 }
 
                 return result;
@@ -894,6 +936,7 @@ namespace kaixo {
                     if constexpr (group != std::string_view::npos) {
                         auto& match = result.groups[group].match;
                         if (match && match.value().empty()) {
+                            result.groups[group].name = Meta::node_meta::group_name;
                             std::size_t size = std::distance(_.backup.data(), match.value().data());
                             match = std::string_view{ _.backup.data(), size };
                         }
@@ -953,13 +996,26 @@ namespace kaixo {
     struct begin_character_class_token;
     struct begin_negated_character_class_token;
     struct end_character_class_token;
-    struct capture_group_token;
     struct non_capturing_group_token;
     struct atomic_group_token;
     struct comment_group_token;
 
     template<template<class> class Assertion>
     struct assertion_token;
+
+    template<regex_literal Name>
+    struct named_capture_group_token {
+        constexpr static regex_literal name = Name;
+        using is_capture_group_token_specifier = int;
+    };
+
+    struct capture_group_token {
+        constexpr static regex_literal<1> name{ "" };
+        using is_capture_group_token_specifier = int;
+    };
+
+    template<class Ty> 
+    concept is_capture_group_token = requires() { typename Ty::is_capture_group_token_specifier; };
 
     template<class A>
     using unit_token = A; // Used as unit in nested_graph_token.
@@ -1465,8 +1521,8 @@ namespace kaixo {
 
     // Case for capture group. Just keeps parsing until it finds the end of the nested expression, 
     // and wraps it in a sub-graph. Also increments the metadata group counter.
-    template<class MetaData, class ...Tokens, class A, class ...Nodes>
-    struct regex_parser<MetaData, token_stream<capture_group_token, Tokens...>, token_stream<A, Nodes...>> {
+    template<class MetaData, is_capture_group_token Group, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<Group, Tokens...>, token_stream<A, Nodes...>> {
         using nested = regex_parser<regex_parser_metadata<>::with_group_counter<MetaData::group_counter + 1>
                                   , token_stream<Tokens...>>;
 
@@ -1477,7 +1533,8 @@ namespace kaixo {
         using parser = regex_parser<
             new_metadata
           , typename nested::remainder
-          , token_stream<nfa_graph_node<nfa_graph_node_metadata<>::template with_group<MetaData::group_counter>
+          , token_stream<nfa_graph_node<typename nfa_graph_node_metadata<>::template with_group<MetaData::group_counter>
+                                                                          ::template with_group_name<Group::name>
                                       , typename nested::type>
                        , typename A::template append_connection<1> // Make connection to next node
                        , Nodes...>
@@ -1805,8 +1862,17 @@ namespace kaixo {
                 else if constexpr (A[2] == '!') return regex_tokenizer<A += 3, 0, Tokens..., assertion_token<negative_lookahead_assertion>>();
                 else if constexpr (A[2] == '<' && A[3] == '=') return regex_tokenizer<A += 4, 0, Tokens..., assertion_token<lookbehind_assertion>>();
                 else if constexpr (A[2] == '<' && A[3] == '!') return regex_tokenizer<A += 4, 0, Tokens..., assertion_token<negative_lookbehind_assertion>>();
+                else if constexpr (A[2] == '\'') {
+                    constexpr auto length = A.view().find('\'', 3) - 3;
+                    constexpr auto name = A.substr(3, length);
+                    return regex_tokenizer<A += (length + 4), 0, Tokens..., named_capture_group_token<name>>();
+                }
+                else if constexpr (A[2] == '<') {
+                    constexpr auto length = A.view().find('>', 3) - 3;
+                    constexpr auto name = A.substr(3, length);
+                    return regex_tokenizer<A += (length + 4), 0, Tokens..., named_capture_group_token<name>>();
+                }
                 else static_assert(A[1] != '?', "Unsupported group type!");
-                // TODO: potentially add named groups.
             } else {
                 return regex_tokenizer<A += 1, 0, Tokens..., capture_group_token>();
             }
