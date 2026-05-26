@@ -174,6 +174,11 @@ static_assert(kaixo::regex<"(?:a{1,2}?){1,2}?">::parse("aaaaaaaa") == "a");
 
 // ------------------------------------------------
 
+static_assert(!kaixo::regex<"(?>.+)a">::parse("aaaaaa"));
+static_assert(kaixo::regex<"(?>b+?)a">::parse("bbbbbbbba") == "ba");
+
+// ------------------------------------------------
+
 int main() {
     using email_regex = kaixo::regex<"\\b([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}\\b)">;
 

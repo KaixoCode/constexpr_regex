@@ -602,17 +602,20 @@ namespace kaixo {
         in the case that it's recursive, the min and max amount of times
         it can recurse.
 
-        @tparam MinRepeats      minimum number of recurses to itself.
-        @tparam MaxRepeats      maximum number of recurses to itself.
-        @tparam Group           group index that this node captures into.
+        @tparam MinRepeats          minimum number of recurses to itself.
+        @tparam MaxRepeats          maximum number of recurses to itself.
+        @tparam Group               group index that this node captures into.
+        @tparam AllowBacktracking   whether this node is allowed to backtrack.
      */
     template<std::size_t MinRepeats = 0
            , std::size_t MaxRepeats = std::string_view::npos
-           , std::size_t Group = std::string_view::npos>
+           , std::size_t Group = std::string_view::npos
+           , bool AllowBacktracking = true>
     struct nfa_graph_node_metadata {
         constexpr static std::size_t min_repeats = MinRepeats;
         constexpr static std::size_t max_repeats = MaxRepeats;
         constexpr static std::size_t group = Group;
+        constexpr static bool allow_backtracking = AllowBacktracking;
 
         /**
             Update the maximum number of repeats.
@@ -620,7 +623,7 @@ namespace kaixo {
             @tparam N       new maximum number of repeats.
          */
         template<std::size_t N>
-        using with_max_repeat = nfa_graph_node_metadata<MinRepeats, N, Group>;
+        using with_max_repeat = nfa_graph_node_metadata<MinRepeats, N, Group, AllowBacktracking>;
 
         /**
             Update the minimum number of repeats.
@@ -628,7 +631,7 @@ namespace kaixo {
             @tparam N       new minimum number of repeats.
          */
         template<std::size_t N>
-        using with_min_repeat = nfa_graph_node_metadata<N, MaxRepeats, Group>;
+        using with_min_repeat = nfa_graph_node_metadata<N, MaxRepeats, Group, AllowBacktracking>;
 
         /**
             Set the groups index.
@@ -636,7 +639,15 @@ namespace kaixo {
             @tparam I           group index.
          */
         template<std::size_t I>
-        using with_group = nfa_graph_node_metadata<MinRepeats, MaxRepeats, I>;
+        using with_group = nfa_graph_node_metadata<MinRepeats, MaxRepeats, I, AllowBacktracking>;
+
+        /**
+            Set whether this node is allowed to backtrack.
+
+            @tparam Allow       whether to allow backtracking.
+         */
+        template<bool Allow>
+        using with_backtracking = nfa_graph_node_metadata<MinRepeats, MaxRepeats, Group, Allow>;
     };
 
     /**
@@ -729,6 +740,7 @@ namespace kaixo {
     struct graph_parse_metadata {
         constexpr static std::size_t index = I;
         constexpr static std::size_t group = NodeMeta::group;
+        constexpr static std::size_t allow_backtracking = NodeMeta::allow_backtracking;
         using result_type = ResultType;
         using parent = ParentGraph;
         using node_meta = NodeMeta;
@@ -835,6 +847,7 @@ namespace kaixo {
         constexpr static typename Meta::result_type parse(context& ctx, std::size_t n = 0, Ns...ns) {
             constexpr std::size_t parent_index = Meta::index;
             constexpr std::size_t group = Meta::group;
+            constexpr bool allow_backtracking = Meta::allow_backtracking;
             using parent = typename Meta::parent;
             using parent_meta = typename Meta::parent_meta;
             using result_type = typename Meta::result_type;
@@ -843,7 +856,10 @@ namespace kaixo {
                 result_type result{};
                 std::string_view end_of_capture_boundary = ctx.value.substr(0, 0);
 
-                if constexpr (std::same_as<parent, void>) { // End of expression, no parent.
+                // Either end of expression (no parent), or doesn't allow backtracking.
+                // In the case of the no-backtracking, the followup is handled after
+                // the recurse down into this subgraph.
+                if constexpr (std::same_as<parent, void> || !allow_backtracking) { 
                     result.match = end_of_capture_boundary;
                 } else { // Otherwise, recurse to followup of parent graph.
                     result = parent::template parse_followup<parent_meta, parent_index>(ctx, ns...);
@@ -865,6 +881,7 @@ namespace kaixo {
 
                 constexpr std::size_t min_repeats = node::metadata::min_repeats;
                 constexpr std::size_t max_repeats = node::metadata::max_repeats;
+                constexpr bool allow_backtracking = node::metadata::allow_backtracking;
 
                 if constexpr (std::same_as<graph_start_node, operation>) {
                     auto _ = ctx.backup();
@@ -883,9 +900,24 @@ namespace kaixo {
 
                     return result;
                 } else if constexpr (is_nfa_graph<operation>) { 
-                    // Nested graph, handles recursion and followups itself
                     using parse_metadata = graph_parse_metadata<result_type, nfa_graph, typename node::metadata, I, Meta>;
-                    return operation::template parse<parse_metadata>(ctx, 0, n, ns...);
+
+                    // If backtracking is allowed, the followup is handled by the subgraph.
+                    // Otherwise, no backtracking means the subgraph consumes as much as it can
+                    // and then we try the followup here, and if it fails it fails.
+                    if constexpr (allow_backtracking) { 
+                        return operation::template parse<parse_metadata>(ctx, 0, n, ns...);
+                    } else {
+                        auto _ = ctx.backup();
+
+                        auto result = operation::template parse<parse_metadata>(ctx, 0, n, ns...);
+                        if (!result) return _.revert();
+
+                        auto followup = parse_followup<Meta, I>(ctx, n, ns...);
+                        if (!followup) return _.revert();
+
+                        return result_type::merge(result, followup);
+                    }
                 } else if constexpr (max_repeats == 0) { // Max repeats == 0, means it shouldn't actually parse this node.
                     return parse_followup<Meta, I>(ctx, n, ns...);
                 } else {
@@ -921,9 +953,11 @@ namespace kaixo {
     struct begin_negated_character_class_token;
     struct end_character_class_token;
     struct capture_group_token;
+    struct non_capturing_group_token;
+    struct atomic_group_token;
 
-    template<template<class> class Nested>
-    struct nested_graph_token; // Signals nested NFA graph.
+    template<template<class> class Assertion>
+    struct assertion_token;
 
     template<class A>
     using unit_token = A; // Used as unit in nested_graph_token.
@@ -1356,22 +1390,69 @@ namespace kaixo {
         using remainder = typename parser::remainder;
     };
 
-    // Case for nested expression; lookaround assertions, or a non-capturing group.
-    // Just keeps parsing until it finds the end of the nested expression, and wraps it
-    // in a sub-graph.
-    template<class MetaData, template<class> class Nested, class ...Tokens, class A, class ...Nodes>
-    struct regex_parser<MetaData, token_stream<nested_graph_token<Nested>, Tokens...>, token_stream<A, Nodes...>> {
+    // Case for assertions, which do not capture anything, so group counter does not increment.
+    // Just keeps parsing until it finds the end of the nested expression, and wraps it in a sub-graph.
+    template<class MetaData, template<class> class Assertion, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<assertion_token<Assertion>, Tokens...>, token_stream<A, Nodes...>> {
         using nested = regex_parser<regex_parser_metadata<>::template with_group_counter<MetaData::group_counter>
                                   , token_stream<Tokens...>>;
 
         using new_metadata = typename MetaData
-            ::template add_token<typename Nested<typename nested::type>::metadata>;
+            ::template add_token<typename Assertion<typename nested::type>::metadata>;
 
         using parser = regex_parser<
             new_metadata
           , typename nested::remainder
           , token_stream<nfa_graph_node<nfa_graph_node_metadata<>
-                                      , Nested<typename nested::type>>
+                                      , Assertion<typename nested::type>>
+                       , typename A::template append_connection<1> // Make connection to next node
+                       , Nodes...>
+        >;
+
+        using type = typename parser::type;
+        using remainder = typename parser::remainder;
+    };
+
+    // Case for non-capturing group. Just keeps parsing until it finds the end of the nested expression, 
+    // and wraps it in a sub-graph. Does not increment the metadata group counter.
+    template<class MetaData, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<non_capturing_group_token, Tokens...>, token_stream<A, Nodes...>> {
+        using nested = regex_parser<regex_parser_metadata<>::with_group_counter<MetaData::group_counter>
+                                  , token_stream<Tokens...>>;
+
+        using new_metadata = typename MetaData
+            ::template add_token<typename nested::type::metadata>
+            ::template with_group_counter<nested::type::metadata::group_counter>;
+
+        using parser = regex_parser<
+            new_metadata
+          , typename nested::remainder
+          , token_stream<nfa_graph_node<nfa_graph_node_metadata<>
+                                      , typename nested::type>
+                       , typename A::template append_connection<1> // Make connection to next node
+                       , Nodes...>
+        >;
+
+        using type = typename parser::type;
+        using remainder = typename parser::remainder;
+    };
+
+    // Case for atomic group. Just keeps parsing until it finds the end of the nested expression, 
+    // and wraps it in a sub-graph. Does not increment the metadata group counter. Force inability to backtrack.
+    template<class MetaData, class ...Tokens, class A, class ...Nodes>
+    struct regex_parser<MetaData, token_stream<atomic_group_token, Tokens...>, token_stream<A, Nodes...>> {
+        using nested = regex_parser<regex_parser_metadata<>::with_group_counter<MetaData::group_counter>
+                                  , token_stream<Tokens...>>;
+
+        using new_metadata = typename MetaData
+            ::template add_token<typename nested::type::metadata>
+            ::template with_group_counter<nested::type::metadata::group_counter>;
+
+        using parser = regex_parser<
+            new_metadata
+          , typename nested::remainder
+          , token_stream<nfa_graph_node<nfa_graph_node_metadata<>::template with_backtracking<false>
+                                      , typename nested::type>
                        , typename A::template append_connection<1> // Make connection to next node
                        , Nodes...>
         >;
@@ -1394,7 +1475,7 @@ namespace kaixo {
         using parser = regex_parser<
             new_metadata
           , typename nested::remainder
-          , token_stream<nfa_graph_node<nfa_graph_node_metadata<>::with_group<MetaData::group_counter>
+          , token_stream<nfa_graph_node<nfa_graph_node_metadata<>::template with_group<MetaData::group_counter>
                                       , typename nested::type>
                        , typename A::template append_connection<1> // Make connection to next node
                        , Nodes...>
@@ -1700,14 +1781,14 @@ namespace kaixo {
         else if constexpr (C > 1 && A[0] == ']') return regex_tokenizer<A += 1, 0, Tokens..., end_character_class_token>();
         else if constexpr (!InsideClass && A[0] == '(') {
             if constexpr (A[1] == '?') {
-                if constexpr (A[2] == ':') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<unit_token>>();
-                else if constexpr (A[2] == '>') static_assert(A[1] != '>', "Atomic groups not supported!");
-                else if constexpr (A[2] == '|') static_assert(A[1] != '|', "Duplicate/reset subpattern group number group not supported!");
-                else if constexpr (A[2] == '#') static_assert(A[1] != '#', "Comment group not supported!");
-                else if constexpr (A[2] == '=') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<lookahead_assertion>>();
-                else if constexpr (A[2] == '!') return regex_tokenizer<A += 3, 0, Tokens..., nested_graph_token<negative_lookahead_assertion>>();
-                else if constexpr (A[2] == '<' && A[3] == '=') return regex_tokenizer<A += 4, 0, Tokens..., nested_graph_token<lookbehind_assertion>>();
-                else if constexpr (A[2] == '<' && A[3] == '!') return regex_tokenizer<A += 4, 0, Tokens..., nested_graph_token<negative_lookbehind_assertion>>();
+                if constexpr (A[2] == ':') return regex_tokenizer<A += 3, 0, Tokens..., non_capturing_group_token>();
+                else if constexpr (A[2] == '>') return regex_tokenizer<A += 3, 0, Tokens..., atomic_group_token>();
+                else if constexpr (A[2] == '|') static_assert(A[2] != '|', "Duplicate/reset subpattern group number group not supported!");
+                else if constexpr (A[2] == '#') static_assert(A[2] != '#', "Comment group not supported!");
+                else if constexpr (A[2] == '=') return regex_tokenizer<A += 3, 0, Tokens..., assertion_token<lookahead_assertion>>();
+                else if constexpr (A[2] == '!') return regex_tokenizer<A += 3, 0, Tokens..., assertion_token<negative_lookahead_assertion>>();
+                else if constexpr (A[2] == '<' && A[3] == '=') return regex_tokenizer<A += 4, 0, Tokens..., assertion_token<lookbehind_assertion>>();
+                else if constexpr (A[2] == '<' && A[3] == '!') return regex_tokenizer<A += 4, 0, Tokens..., assertion_token<negative_lookbehind_assertion>>();
                 else static_assert(A[1] != '?', "Unsupported group type!");
                 // TODO: potentially add named groups.
             } else {
